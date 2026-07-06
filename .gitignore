@@ -1,0 +1,8 @@
+.env
+config.js
+node_modules/
+.claude/
+
+# Exports pessoais do TV Time (histórico de filmes/séries assistidos)
+tvtime-*.json
+tvtime-summary*.html
