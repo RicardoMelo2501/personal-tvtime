@@ -10,7 +10,6 @@
   var AUTH_SESSION_KEY = "tvtime_clone_auth_session_v1";
 
   var TODAY = new Date();
-  var OVERRIDES_KEY = "tvtime_clone_overrides_v1";
   var PAGE_SIZE = 8;
 
   var state = {
@@ -111,106 +110,39 @@
     location.reload();
   }
 
-  // ---------- Overrides (localStorage) ----------
-  // Overrides store local corrections that never get written back to
-  // Supabase (the anon key is read-only by design). They carry enough
-  // display metadata (title/name) so the "Assistidos" tab can render
-  // freshly-marked episodes without an extra round trip.
-  function loadOverrides() {
-    try {
-      var raw = localStorage.getItem(OVERRIDES_KEY);
-      return raw ? JSON.parse(raw) : { episodes: {}, movies: {} };
-    } catch (e) {
-      return { episodes: {}, movies: {} };
-    }
-  }
-  function saveOverrides(ov) {
-    localStorage.setItem(OVERRIDES_KEY, JSON.stringify(ov));
-  }
-  var overrides = loadOverrides();
-
+  // ---------- Watched-status writes ----------
+  // Marking/unmarking writes straight to Postgres (RLS grants authenticated
+  // users UPDATE on episodes/movies). This makes series_progress and
+  // episodes_watched_feed immediately correct with zero client-side
+  // reconciliation — earlier this was a localStorage "overrides" layer that
+  // required re-fetching every previously-touched series on every load.
   function episodeKey(seriesUuid, season, number) {
     return seriesUuid + "|" + season + "|" + number;
   }
-  function seriesUuidFromKey(key) {
-    return key.split("|")[0];
+
+  function patchEpisodeWatched(seriesUuid, season, number, watched) {
+    var body = watched
+      ? { is_watched: true, watched_at: new Date().toISOString() }
+      : { is_watched: false, watched_at: null };
+    return fetch(
+      SUPABASE_CONFIG.url + "/rest/v1/episodes?series_uuid=eq." + seriesUuid +
+        "&season_number=eq." + season + "&number=eq." + number,
+      { method: "PATCH", headers: authHeaders({ "Content-Type": "application/json", Prefer: "return=minimal" }), body: JSON.stringify(body) }
+    ).then(function (r) {
+      handleAuthFailure(r);
+      if (!r.ok) return r.text().then(function (t) { throw new Error("Falha ao atualizar episódio: " + t); });
+    });
   }
 
-  function applyOverridesToSeries(seriesArr) {
-    seriesArr.forEach(function (s) {
-      (s.seasons || []).forEach(function (season) {
-        (season.episodes || []).forEach(function (ep) {
-          var key = episodeKey(s.uuid, season.number, ep.number);
-          var ov = overrides.episodes[key];
-          if (!ov) return;
-          if (typeof ov === "string") {
-            // legacy format: plain ISO date string means "marked watched"
-            ep.is_watched = true;
-            ep.watched_at = ov;
-          } else if (ov.watched === false) {
-            ep.is_watched = false;
-            ep.watched_at = null;
-          } else {
-            ep.is_watched = true;
-            ep.watched_at = ov.at || ep.watched_at;
-          }
-        });
-      });
-    });
-  }
-  function markEpisodeWatched(seriesUuid, season, number, title, name, tvdbId) {
-    var key = episodeKey(seriesUuid, season, number);
-    overrides.episodes[key] = {
-      watched: true,
-      at: new Date().toISOString(),
-      title: title,
-      season: season,
-      number: number,
-      name: name,
-      tvdbId: tvdbId
-    };
-    saveOverrides(overrides);
-  }
-  function unmarkEpisodeWatched(seriesUuid, season, number) {
-    var key = episodeKey(seriesUuid, season, number);
-    overrides.episodes[key] = { watched: false };
-    saveOverrides(overrides);
-  }
-  function getOverriddenSeriesUuids() {
-    var set = {};
-    Object.keys(overrides.episodes).forEach(function (key) {
-      set[seriesUuidFromKey(key)] = true;
-    });
-    return Object.keys(set);
-  }
-  function getLocallyWatchedExtras() {
-    var arr = [];
-    Object.keys(overrides.episodes).forEach(function (key) {
-      var ov = overrides.episodes[key];
-      if (ov && typeof ov === "object" && ov.watched === true && ov.title) {
-        var seed = colorSeed(ov.title);
-        arr.push({
-          id: seriesUuidFromKey(key),
-          title: ov.title,
-          tvdbId: ov.tvdbId,
-          season: ov.season,
-          episode: ov.number,
-          episodeName: ov.name || ("Episódio " + ov.number),
-          watchedAt: ov.at,
-          hue1: seed[0],
-          hue2: seed[1]
-        });
-      }
-    });
-    return arr;
-  }
-  function applyOverridesToMovies(moviesArr) {
-    moviesArr.forEach(function (m) {
-      var ov = overrides.movies[m.uuid];
-      if (ov) {
-        m.is_watched = true;
-        m.watched_at = ov;
-      }
+  function patchMovieWatched(uuid, watched) {
+    var body = watched
+      ? { is_watched: true, watched_at: new Date().toISOString() }
+      : { is_watched: false, watched_at: null };
+    return fetch(SUPABASE_CONFIG.url + "/rest/v1/movies?uuid=eq." + uuid, {
+      method: "PATCH", headers: authHeaders({ "Content-Type": "application/json", Prefer: "return=minimal" }), body: JSON.stringify(body)
+    }).then(function (r) {
+      handleAuthFailure(r);
+      if (!r.ok) return r.text().then(function (t) { throw new Error("Falha ao atualizar filme: " + t); });
     });
   }
 
@@ -284,6 +216,7 @@
           id: s.uuid,
           title: title,
           tvdbId: s.tvdb_id,
+          episodeTvdbId: s.first_episode_tvdb_id,
           season: s.first_season,
           episode: s.first_number,
           episodeName: s.first_name || ("Episódio " + s.first_number),
@@ -306,6 +239,7 @@
         id: s.uuid,
         title: title,
         tvdbId: s.tvdb_id,
+        episodeTvdbId: s.next_episode_tvdb_id,
         season: s.next_season,
         episode: s.next_number,
         episodeName: s.next_name || ("Episódio " + s.next_number),
@@ -320,89 +254,6 @@
     minhaLista.sort(function (a, b) { return (b.lastActivity || "").localeCompare(a.lastActivity || ""); });
     emBreve.sort(function (a, b) { return (b.addedAt || "").localeCompare(a.addedAt || ""); });
     return { minhaLista: minhaLista, emBreve: emBreve };
-  }
-
-  // Per-series recomputation, used only for series touched by local overrides
-  // (the series_progress view reflects the database, not localStorage corrections).
-  function computeSeriesEntry(s) {
-    var title = s.title || "Sem título";
-    var seasons = (s.seasons || [])
-      .filter(function (se) { return !se.is_specials; })
-      .slice()
-      .sort(function (a, b) { return (a.number || 0) - (b.number || 0); });
-
-    var flat = [];
-    seasons.forEach(function (season) {
-      var eps = (season.episodes || []).slice().sort(function (a, b) { return (a.number || 0) - (b.number || 0); });
-      eps.forEach(function (ep) {
-        flat.push({
-          season: season.number,
-          number: ep.number,
-          name: ep.name || ("Episódio " + ep.number),
-          is_watched: !!ep.is_watched,
-          watched_at: ep.watched_at
-        });
-      });
-    });
-    if (!flat.length) return null;
-
-    var watchedEps = flat.filter(function (e) { return e.is_watched; });
-    var unwatchedEps = flat.filter(function (e) { return !e.is_watched; });
-    var lastWatchedAt = null;
-    watchedEps.forEach(function (e) {
-      if (e.watched_at && (!lastWatchedAt || e.watched_at > lastWatchedAt)) lastWatchedAt = e.watched_at;
-    });
-    var seed = colorSeed(title);
-
-    if (!watchedEps.length) {
-      var firstEp = flat[0];
-      return {
-        type: "em-breve",
-        item: {
-          id: s.uuid, title: title, tvdbId: s.tvdb_id, season: firstEp.season, episode: firstEp.number,
-          episodeName: firstEp.name, addedAt: s.created_at, hue1: seed[0], hue2: seed[1]
-        }
-      };
-    }
-    if (!unwatchedEps.length) return null;
-
-    var nextEp = unwatchedEps[0];
-    var isPremiere = nextEp.season === flat[0].season && nextEp.number === 1;
-    var last = flat[flat.length - 1];
-    var isLatest = nextEp.season === last.season && nextEp.number === last.number;
-    var tags = [];
-    if (isPremiere) tags.push("PREMIERE");
-    else if (isLatest) tags.push("MAIS RECENTE");
-
-    return {
-      type: "minha-lista",
-      item: {
-        id: s.uuid, title: title, tvdbId: s.tvdb_id, season: nextEp.season, episode: nextEp.number,
-        episodeName: nextEp.name, tags: tags, stale: daysSince(lastWatchedAt) > 120,
-        lastActivity: lastWatchedAt || s.created_at, hue1: seed[0], hue2: seed[1]
-      }
-    };
-  }
-
-  function applyOverriddenSeriesToLists(lists) {
-    var uuids = getOverriddenSeriesUuids();
-    if (!uuids.length) return Promise.resolve(lists);
-    return Promise.all(uuids.map(fetchSeriesDetail)).then(function (details) {
-      details.forEach(function (detail) {
-        if (!detail) return;
-        applyOverridesToSeries([detail]);
-        lists.minhaLista = lists.minhaLista.filter(function (i) { return i.id !== detail.uuid; });
-        lists.emBreve = lists.emBreve.filter(function (i) { return i.id !== detail.uuid; });
-        var entry = computeSeriesEntry(detail);
-        if (entry) {
-          if (entry.type === "minha-lista") lists.minhaLista.push(entry.item);
-          else lists.emBreve.push(entry.item);
-        }
-      });
-      lists.minhaLista.sort(function (a, b) { return (b.lastActivity || "").localeCompare(a.lastActivity || ""); });
-      lists.emBreve.sort(function (a, b) { return (b.addedAt || "").localeCompare(a.addedAt || ""); });
-      return lists;
-    });
   }
 
   // ---------- Rendering: cards ----------
@@ -436,17 +287,13 @@
         }).join("") + '</div>'
       : "";
 
-    var watchedNow = kind === "em-breve"
-      ? overrides.episodes[episodeKey(item.id, item.season, item.episode)]
-      : false;
-
     var subLineHtml = kind === "assistidos"
       ? '<div class="watched-meta">' + escapeHtml(formatWatchedAt(item.watchedAt)) + '</div>'
       : '<div class="episode-title">' + escapeHtml(item.episodeName) + '</div>';
 
     var actionHtml = kind === "assistidos"
       ? '<button class="undo-btn" title="Corrigir: marcar como não assistido">' + iconUndo() + '</button>'
-      : '<button class="check-btn' + (watchedNow ? ' watched' : '') + '" title="Marcar como assistido">' + iconCheck() + '</button>';
+      : '<button class="check-btn" title="Marcar como assistido">' + iconCheck() + '</button>';
 
     wrap.innerHTML =
       staleHtml +
@@ -531,15 +378,19 @@
   }
 
   // ---------- Interactive mark / undo ----------
+  // Re-derives just this series' home-tab entry from the series_progress
+  // view (a single lightweight row, computed live by Postgres from the
+  // write we just made) instead of re-fetching/recomputing from scratch.
   function refreshSeriesInLists(uuid) {
-    return fetchSeriesDetail(uuid).then(function (detail) {
-      applyOverridesToSeries([detail]);
+    return fetchOne("series_progress", "select=*&uuid=eq." + uuid).then(function (rows) {
+      var row = rows && rows[0];
       state.minhaLista = state.minhaLista.filter(function (i) { return i.id !== uuid; });
       state.emBreve = state.emBreve.filter(function (i) { return i.id !== uuid; });
-      var entry = computeSeriesEntry(detail);
-      if (entry) {
-        if (entry.type === "minha-lista") state.minhaLista.push(entry.item);
-        else state.emBreve.push(entry.item);
+      if (row) {
+        var built = buildHomeListsFromProgress([row]);
+        if (built.minhaLista.length) state.minhaLista.push(built.minhaLista[0]);
+        else if (built.emBreve.length) state.emBreve.push(built.emBreve[0]);
+        state.seriesProgress = state.seriesProgress.filter(function (s) { return s.uuid !== uuid; }).concat([row]);
       }
       state.minhaLista.sort(function (a, b) { return (b.lastActivity || "").localeCompare(a.lastActivity || ""); });
       state.emBreve.sort(function (a, b) { return (b.addedAt || "").localeCompare(a.addedAt || ""); });
@@ -549,14 +400,21 @@
   function handleCardClick(e) {
     var checkBtn = e.target.closest(".check-btn");
     var undoBtn = e.target.closest(".undo-btn");
-    if (!checkBtn && !undoBtn) return;
-
     var card = e.target.closest(".card");
+    if (!card) return;
+
     var id = card.getAttribute("data-id");
     var season = parseInt(card.getAttribute("data-season"), 10);
     var episode = parseInt(card.getAttribute("data-episode"), 10);
     var list = getActiveList();
     var item = list.filter(function (i) { return i.id === id && i.season === season && i.episode === episode; })[0];
+
+    // Marking/undoing watched state only ever happens via the right-side
+    // button. Clicking anywhere else on the card opens episode details.
+    if (!checkBtn && !undoBtn) {
+      openEpisodeModal(item || { id: id, season: season, episode: episode, title: "", episodeName: "" });
+      return;
+    }
 
     if (checkBtn) {
       checkBtn.classList.add("confirming");
@@ -565,41 +423,50 @@
       var title = item ? item.title : "";
       var episodeName = item ? item.episodeName : "";
       var tvdbId = item ? item.tvdbId : null;
+      var episodeTvdbId = item ? item.episodeTvdbId : null;
 
-      markEpisodeWatched(id, season, episode, title, episodeName, tvdbId);
       state.assistidos.unshift({
-        id: id, title: title, tvdbId: tvdbId, season: season, episode: episode, episodeName: episodeName,
+        id: id, title: title, tvdbId: tvdbId, episodeTvdbId: episodeTvdbId, season: season, episode: episode, episodeName: episodeName,
         watchedAt: new Date().toISOString(), hue1: item ? item.hue1 : 0, hue2: item ? item.hue2 : 40
       });
 
-      refreshSeriesInLists(id).then(function () { renderList(true); });
+      patchEpisodeWatched(id, season, episode, true)
+        .then(function () { return refreshSeriesInLists(id); })
+        .then(function () { renderList(true); })
+        .catch(function (err) {
+          state.assistidos.shift();
+          renderList(true);
+          showToast("Erro ao marcar episódio");
+          console.error(err);
+        });
 
       showToast("Episódio marcado como assistido", {
         label: "Desfazer",
         onClick: function () {
-          unmarkEpisodeWatched(id, season, episode);
           state.assistidos = state.assistidos.filter(function (i) {
             return !(i.id === id && i.season === season && i.episode === episode);
           });
-          refreshSeriesInLists(id).then(function () { renderList(true); });
+          patchEpisodeWatched(id, season, episode, false)
+            .then(function () { return refreshSeriesInLists(id); })
+            .then(function () { renderList(true); });
         }
       });
       return;
     }
 
-    unmarkEpisodeWatched(id, season, episode);
     state.assistidos = state.assistidos.filter(function (i) {
       return !(i.id === id && i.season === season && i.episode === episode);
     });
     renderList(true);
-    refreshSeriesInLists(id);
+    patchEpisodeWatched(id, season, episode, false).then(function () { return refreshSeriesInLists(id); });
 
     showToast("Marcação corrigida: episódio não assistido", {
       label: "Desfazer",
       onClick: function () {
-        markEpisodeWatched(id, season, episode, item ? item.title : "", item ? item.episodeName : "", item ? item.tvdbId : null);
         state.assistidos.unshift(item || { id: id, title: "", season: season, episode: episode, episodeName: "", watchedAt: new Date().toISOString(), hue1: 0, hue2: 40 });
-        refreshSeriesInLists(id).then(function () { renderList(true); });
+        patchEpisodeWatched(id, season, episode, true)
+          .then(function () { return refreshSeriesInLists(id); })
+          .then(function () { renderList(true); });
       }
     });
   }
@@ -624,6 +491,9 @@
 
     document.getElementById("list-container").addEventListener("click", handleCardClick);
     document.getElementById("list-container").addEventListener("scroll", handleScroll);
+
+    document.getElementById("episode-modal-close").addEventListener("click", closeEpisodeModal);
+    document.querySelector("#episode-modal .episode-modal-backdrop").addEventListener("click", closeEpisodeModal);
   }
 
   // ---------- Bottom nav ----------
@@ -657,20 +527,44 @@
   }
 
   // ---------- Search screen ----------
+  function buildSearchRow(item) {
+    var row = document.createElement("div");
+    row.className = "search-row";
+    row.setAttribute("data-kind", item.kind);
+    if (item.id) row.setAttribute("data-id", item.id);
+    if (item.tvdbId) row.setAttribute("data-tvdb-id", item.tvdbId);
+    if (item.name) row.setAttribute("data-name", item.name);
+    if (item.year) row.setAttribute("data-year", item.year);
+    row.innerHTML =
+      '<div class="search-avatar" style="' + posterStyle(item.hue1, item.hue2) + '">' + escapeHtml(initials(item.title)) + '</div>' +
+      '<div class="search-meta">' +
+        '<div class="search-title">' + escapeHtml(item.title) + '</div>' +
+        '<div class="search-sub">' + escapeHtml(item.sub) + '</div>' +
+      '</div>' +
+      (item.badge ? '<span class="search-add-badge">' + escapeHtml(item.badge) + '</span>' : '<span class="search-type-badge">' + escapeHtml(item.type) + '</span>');
+    if (item.imageUrl) setElementImage(row.querySelector(".search-avatar"), item.imageUrl);
+    else if (item.tvdbId && item.kind === "series") applyPosterArtwork(row.querySelector(".search-avatar"), item.tvdbId);
+    return row;
+  }
+
   function renderSearchResults(query) {
     var container = document.getElementById("search-results");
-    query = (query || "").trim().toLowerCase();
-    if (!query) {
+    query = (query || "").trim();
+    var qLower = query.toLowerCase();
+    if (!qLower) {
       container.innerHTML = '<div class="empty-state">Digite para buscar em filmes e séries.</div>';
       return;
     }
 
+    var localTvdbIds = {};
     var seriesMatches = state.seriesSearchStats
-      .filter(function (s) { return (s.title || "").toLowerCase().indexOf(query) !== -1; })
+      .filter(function (s) { return (s.title || "").toLowerCase().indexOf(qLower) !== -1; })
       .slice(0, 25)
       .map(function (s) {
+        if (s.tvdb_id) localTvdbIds[s.tvdb_id] = true;
         var seed = colorSeed(s.title || "?");
         return {
+          kind: "series", id: s.uuid, tvdbId: s.tvdb_id,
           type: "Série", title: s.title || "Sem título",
           sub: s.watched_episodes + "/" + s.total_episodes + " episódios assistidos",
           hue1: seed[0], hue2: seed[1]
@@ -678,11 +572,13 @@
       });
 
     var movieMatches = state.moviesRaw
-      .filter(function (m) { return (m.title || "").toLowerCase().indexOf(query) !== -1; })
+      .filter(function (m) { return (m.title || "").toLowerCase().indexOf(qLower) !== -1; })
       .slice(0, 25)
       .map(function (m) {
+        if (m.tvdb_id) localTvdbIds[m.tvdb_id] = true;
         var seed = colorSeed(m.title || "?");
         return {
+          kind: "movie", id: m.uuid, tvdbId: m.tvdb_id,
           type: "Filme", title: m.title || "Sem título",
           sub: (m.year || "—") + (m.is_watched ? " · Assistido" : " · Não assistido"),
           hue1: seed[0], hue2: seed[1]
@@ -690,21 +586,59 @@
       });
 
     var all = seriesMatches.concat(movieMatches);
-    if (!all.length) {
-      container.innerHTML = '<div class="empty-state">Nada encontrado para "' + escapeHtml(query) + '".</div>';
-      return;
+    container.innerHTML = "";
+    if (all.length) {
+      all.forEach(function (item) { container.appendChild(buildSearchRow(item)); });
+    } else {
+      var empty = document.createElement("div");
+      empty.className = "empty-state";
+      empty.textContent = 'Nada na sua lista para "' + query + '".';
+      container.appendChild(empty);
     }
 
-    container.innerHTML = all.map(function (item) {
-      return '<div class="search-row">' +
-        '<div class="search-avatar" style="' + posterStyle(item.hue1, item.hue2) + '">' + escapeHtml(initials(item.title)) + '</div>' +
-        '<div class="search-meta">' +
-          '<div class="search-title">' + escapeHtml(item.title) + '</div>' +
-          '<div class="search-sub">' + escapeHtml(item.sub) + '</div>' +
-        '</div>' +
-        '<span class="search-type-badge">' + item.type + '</span>' +
-      '</div>';
-    }).join("");
+    // Online TheTVDB search for titles not yet in the library, debounced so
+    // we don't fire a network+login round trip on every keystroke.
+    clearTimeout(renderSearchResults._timer);
+    renderSearchResults._timer = setTimeout(function () {
+      if (document.getElementById("search-input").value.trim() !== query) return;
+      tvdbSearchOnline(query).then(function (results) {
+        if (document.getElementById("search-input").value.trim() !== query) return;
+        var newOnes = results.filter(function (r) { return !localTvdbIds[r.tvdb_id]; }).slice(0, 8);
+        if (!newOnes.length) return;
+
+        var heading = document.createElement("div");
+        heading.className = "search-section-heading";
+        heading.textContent = "Adicionar da TheTVDB";
+        container.appendChild(heading);
+
+        newOnes.forEach(function (r) {
+          var seed = colorSeed(r.name || "?");
+          container.appendChild(buildSearchRow({
+            kind: r.type === "series" ? "add-series" : "add-movie",
+            tvdbId: r.tvdb_id, name: r.name, year: r.year,
+            title: r.name || "Sem título",
+            sub: r.year || (r.type === "series" ? "Série" : "Filme"),
+            badge: "+ Adicionar",
+            imageUrl: r.image_url,
+            hue1: seed[0], hue2: seed[1]
+          }));
+        });
+      });
+    }, 400);
+  }
+
+  function handleSearchResultClick(e) {
+    var row = e.target.closest(".search-row");
+    if (!row) return;
+    var kind = row.getAttribute("data-kind");
+    if (kind === "series") openSeriesDetail(row.getAttribute("data-id"));
+    else if (kind === "movie") openMovieDetail(row.getAttribute("data-id"));
+    else openAddPreview(
+      kind === "add-series" ? "series" : "movie",
+      row.getAttribute("data-tvdb-id"),
+      row.getAttribute("data-name"),
+      row.getAttribute("data-year")
+    );
   }
 
   function setupSearch() {
@@ -712,6 +646,7 @@
     input.addEventListener("input", function () {
       renderSearchResults(input.value);
     });
+    document.getElementById("search-results").addEventListener("click", handleSearchResultClick);
     renderSearchResults("");
   }
 
@@ -806,6 +741,7 @@
       season.episodes.push({
         number: ep.number,
         name: ep.name,
+        tvdb_id: ep.tvdb_id,
         special: ep.special,
         is_watched: ep.is_watched,
         watched_at: ep.watched_at,
@@ -889,25 +825,675 @@
     return tvdbImageCache[tvdbId];
   }
 
-  // Progressively upgrades a card's gradient/initials poster to the real
-  // cover once it loads, without blocking the initial render.
+  // Swaps a poster/avatar element's gradient placeholder for a real cover
+  // once it loads, without blocking the initial render.
+  function setElementImage(el, url) {
+    if (!url) return;
+    var preload = new Image();
+    preload.onload = function () {
+      if (!document.body.contains(el)) return;
+      // The gradient placeholder was set via the "background" shorthand,
+      // which implicitly resets background-size/position to "auto" inline
+      // (beating the stylesheet's "cover"). Set them explicitly here too.
+      el.style.backgroundImage = "url('" + url.replace(/'/g, "\\'") + "')";
+      el.style.backgroundSize = "cover";
+      el.style.backgroundPosition = "center";
+      el.style.backgroundRepeat = "no-repeat";
+      el.classList.add("has-image");
+    };
+    preload.src = url;
+  }
+
   function applyPosterArtwork(posterEl, tvdbId) {
     if (!tvdbId) return;
-    fetchSeriesArtwork(tvdbId).then(function (url) {
-      if (!url || !document.body.contains(posterEl)) return;
-      var preload = new Image();
-      preload.onload = function () {
-        if (!document.body.contains(posterEl)) return;
-        // The gradient placeholder was set via the "background" shorthand,
-        // which implicitly resets background-size/position to "auto" inline
-        // (beating the stylesheet's "cover"). Set them explicitly here too.
-        posterEl.style.backgroundImage = "url('" + url.replace(/'/g, "\\'") + "')";
-        posterEl.style.backgroundSize = "cover";
-        posterEl.style.backgroundPosition = "center";
-        posterEl.style.backgroundRepeat = "no-repeat";
-        posterEl.classList.add("has-image");
-      };
-      preload.src = url;
+    fetchSeriesArtwork(tvdbId).then(function (url) { setElementImage(posterEl, url); });
+  }
+
+  var tvdbEpisodeCache = {};
+  function fetchEpisodeDetails(episodeTvdbId) {
+    if (!episodeTvdbId || !TVDB_CONFIG || !TVDB_CONFIG.apiKey) return Promise.resolve(null);
+    if (tvdbEpisodeCache[episodeTvdbId]) return tvdbEpisodeCache[episodeTvdbId];
+
+    tvdbEpisodeCache[episodeTvdbId] = getTvdbToken().then(function (token) {
+      if (!token) return null;
+      var headers = { Authorization: "Bearer " + token };
+      // Never trust the base "extended" name/overview alone — for shows
+      // whose original language isn't Portuguese or English, it comes back
+      // in that original language. Always prefer the por/eng translations.
+      return Promise.all([
+        fetch(TVDB_API_BASE + "/episodes/" + episodeTvdbId + "/extended", { headers: headers })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .catch(function () { return null; }),
+        fetch(TVDB_API_BASE + "/episodes/" + episodeTvdbId + "/translations/por", { headers: headers })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .catch(function () { return null; }),
+        fetch(TVDB_API_BASE + "/episodes/" + episodeTvdbId + "/translations/eng", { headers: headers })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .catch(function () { return null; })
+      ]).then(function (results) {
+        var base = results[0] && results[0].data;
+        var pt = results[1] && results[1].data;
+        var en = results[2] && results[2].data;
+        if (!base) return null;
+        return {
+          name: (pt && pt.name) || (en && en.name) || null,
+          overview: (pt && pt.overview) || (en && en.overview) || null,
+          image: base.image || null,
+          aired: base.aired || null,
+          runtime: base.runtime || null
+        };
+      });
+    }).catch(function (err) {
+      console.error(err);
+      return null;
+    });
+    return tvdbEpisodeCache[episodeTvdbId];
+  }
+
+  function formatAiredDate(dateStr) {
+    if (!dateStr) return null;
+    var d = new Date(dateStr + "T00:00:00");
+    if (isNaN(d.getTime())) return null;
+    return pad2(d.getDate()) + "/" + pad2(d.getMonth() + 1) + "/" + d.getFullYear();
+  }
+
+  // ---------- Series / movie detail screen ----------
+  var tvdbExtendedCache = {};
+  function fetchExtendedInfo(kind, tvdbId) {
+    if (!tvdbId || !TVDB_CONFIG || !TVDB_CONFIG.apiKey) return Promise.resolve(null);
+    var cacheKey = kind + ":" + tvdbId;
+    if (tvdbExtendedCache[cacheKey]) return tvdbExtendedCache[cacheKey];
+
+    tvdbExtendedCache[cacheKey] = getTvdbToken().then(function (token) {
+      if (!token) return null;
+      var headers = { Authorization: "Bearer " + token };
+      return Promise.all([
+        fetch(TVDB_API_BASE + "/" + kind + "/" + tvdbId + "/extended", { headers: headers })
+          .then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+        fetch(TVDB_API_BASE + "/" + kind + "/" + tvdbId + "/translations/por", { headers: headers })
+          .then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+        fetch(TVDB_API_BASE + "/" + kind + "/" + tvdbId + "/translations/eng", { headers: headers })
+          .then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; })
+      ]).then(function (results) {
+        var base = results[0] && results[0].data;
+        var pt = results[1] && results[1].data;
+        var en = results[2] && results[2].data;
+        if (!base) return null;
+
+        var studio = null;
+        if (base.companies && !Array.isArray(base.companies)) {
+          var pool = (base.companies.studio || []).concat(base.companies.production || []);
+          studio = pool.length ? pool[0].name : null;
+        } else if (Array.isArray(base.companies) && base.companies.length) {
+          studio = base.companies[0].name;
+        }
+
+        return {
+          // Title falls back to the base name as a last resort (better than
+          // nothing), but the synopsis is strictly PT/EN — never the show's
+          // original-language overview.
+          name: (pt && pt.name) || (en && en.name) || base.name || null,
+          overview: (pt && pt.overview) || (en && en.overview) || null,
+          image: base.image || null,
+          status: base.status && base.status.name,
+          year: base.year || null,
+          genres: (base.genres || []).map(function (g) { return g.name; }),
+          runtime: base.averageRuntime || base.runtime || null,
+          studio: studio
+        };
+      });
+    }).catch(function (err) {
+      console.error(err);
+      return null;
+    });
+    return tvdbExtendedCache[cacheKey];
+  }
+  function fetchSeriesExtendedInfo(tvdbId) { return fetchExtendedInfo("series", tvdbId); }
+  function fetchMovieExtendedInfo(tvdbId) { return fetchExtendedInfo("movies", tvdbId); }
+
+  function detailBadgesHtml(badges) {
+    return badges.length
+      ? '<div class="detail-meta-row">' + badges.map(function (b) { return '<span class="detail-badge">' + escapeHtml(b) + '</span>'; }).join("") + '</div>'
+      : "";
+  }
+
+  function closeDetailScreen() {
+    document.getElementById("detail-screen").classList.remove("show");
+  }
+
+  function openSeriesDetail(uuid) {
+    var screen = document.getElementById("detail-screen");
+    var body = document.getElementById("detail-body");
+    var meta = state.seriesSearchStats.filter(function (s) { return s.uuid === uuid; })[0];
+
+    body.innerHTML = '<div class="detail-loading">Carregando…</div>';
+    screen.classList.add("show");
+    screen.setAttribute("data-kind", "series");
+    screen.setAttribute("data-id", uuid);
+
+    Promise.all([
+      fetchSeriesDetail(uuid),
+      meta && meta.tvdb_id ? fetchSeriesExtendedInfo(meta.tvdb_id) : Promise.resolve(null)
+    ]).then(function (results) {
+      if (screen.getAttribute("data-id") !== uuid) return; // user navigated away meanwhile
+      renderSeriesDetail(uuid, results[0], results[1]);
+    }).catch(function (err) {
+      body.innerHTML = '<div class="detail-empty">Erro ao carregar detalhes desta série.</div>';
+      console.error(err);
+    });
+  }
+
+  function renderSeriesDetail(uuid, detail, extended) {
+    var body = document.getElementById("detail-body");
+    var title = detail.title || "Sem título";
+    var seed = colorSeed(title);
+
+    var seasons = (detail.seasons || []).slice().sort(function (a, b) { return (a.number || 0) - (b.number || 0); });
+    var totalEps = 0, watchedEps = 0;
+    seasons.forEach(function (se) {
+      (se.episodes || []).forEach(function (ep) { totalEps++; if (ep.is_watched) watchedEps++; });
+    });
+
+    var badges = [];
+    if (extended) {
+      if (extended.status) badges.push(extended.status);
+      if (extended.year) badges.push(String(extended.year));
+      if (extended.runtime) badges.push(extended.runtime + " min/ep");
+      badges = badges.concat((extended.genres || []).slice(0, 3));
+    }
+
+    var heroImage = extended && extended.image;
+    var overview = (extended && extended.overview) || "Sinopse não disponível.";
+    var studioLine = extended && extended.studio;
+
+    var seasonsHtml = seasons.map(function (se) {
+      var heading = se.is_specials ? "Especiais" : "Temporada " + se.number;
+      var eps = (se.episodes || []).slice().sort(function (a, b) { return (a.number || 0) - (b.number || 0); });
+      var rowsHtml = eps.map(function (ep) {
+        return '<div class="episode-row' + (ep.is_watched ? ' watched' : '') + '" data-season="' + se.number + '" data-episode="' + ep.number + '">' +
+          '<div class="episode-row-number">' + pad2(ep.number) + '</div>' +
+          '<div class="episode-row-name">' + escapeHtml(ep.name || ("Episódio " + ep.number)) + '</div>' +
+          '<div class="episode-row-check">' + iconCheck() + '</div>' +
+        '</div>';
+      }).join("");
+      return '<div class="season-heading">' + escapeHtml(heading) + '</div><div class="episode-row-list">' + rowsHtml + '</div>';
+    }).join("");
+
+    body.innerHTML =
+      '<div class="detail-hero" style="' + (heroImage ? "background-image:url('" + heroImage.replace(/'/g, "\\'") + "')" : posterStyle(seed[0], seed[1])) + '">' +
+        '<div class="detail-hero-fade"></div>' +
+        '<div class="detail-hero-info">' +
+          '<div class="detail-title">' + escapeHtml(title) + '</div>' +
+          detailBadgesHtml(badges) +
+          '<div class="detail-progress"><span id="detail-progress-count">' + watchedEps + '/' + totalEps + ' episódios assistidos</span>' +
+            (studioLine ? ' · ' + escapeHtml(studioLine) : '') +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="detail-section">' +
+        '<div class="detail-overview">' + escapeHtml(overview) + '</div>' +
+        '<button id="remove-from-library-btn" class="remove-from-library-btn">Remover da minha lista</button>' +
+      '</div>' +
+      seasonsHtml;
+
+    document.getElementById("remove-from-library-btn").addEventListener("click", function () {
+      handleRemoveClick(this, "series", uuid, title);
+    });
+  }
+
+  function handleDetailBodyClick(e) {
+    var screen = document.getElementById("detail-screen");
+    if (screen.getAttribute("data-kind") !== "series") return;
+    var row = e.target.closest(".episode-row");
+    if (!row) return;
+
+    var uuid = screen.getAttribute("data-id");
+    var season = parseInt(row.getAttribute("data-season"), 10);
+    var episode = parseInt(row.getAttribute("data-episode"), 10);
+    var nowWatched = !row.classList.contains("watched");
+
+    var detail = state.seriesDetailCache[uuid];
+    var epObj = null;
+    (detail.seasons || []).forEach(function (se) {
+      if (se.number !== season) return;
+      (se.episodes || []).forEach(function (ep) { if (ep.number === episode) epObj = ep; });
+    });
+
+    var seriesMeta = state.seriesSearchStats.filter(function (s) { return s.uuid === uuid; })[0];
+    var title = (seriesMeta && seriesMeta.title) || detail.title || "";
+    var episodeName = epObj ? (epObj.name || ("Episódio " + episode)) : ("Episódio " + episode);
+    var seed = colorSeed(title);
+
+    row.classList.toggle("watched", nowWatched);
+    var countEl = document.getElementById("detail-progress-count");
+    if (countEl) {
+      var total = document.querySelectorAll(".episode-row").length;
+      var watched = document.querySelectorAll(".episode-row.watched").length;
+      countEl.textContent = watched + "/" + total + " episódios assistidos";
+    }
+
+    if (nowWatched) {
+      state.assistidos.unshift({
+        id: uuid, title: title, tvdbId: detail.tvdb_id, episodeTvdbId: epObj ? epObj.tvdb_id : null,
+        season: season, episode: episode, episodeName: episodeName,
+        watchedAt: new Date().toISOString(), hue1: seed[0], hue2: seed[1]
+      });
+    } else {
+      state.assistidos = state.assistidos.filter(function (i) {
+        return !(i.id === uuid && i.season === season && i.episode === episode);
+      });
+    }
+    if (epObj) {
+      epObj.is_watched = nowWatched;
+      epObj.watched_at = nowWatched ? new Date().toISOString() : null;
+    }
+    if (seriesMeta) seriesMeta.watched_episodes += nowWatched ? 1 : -1;
+
+    patchEpisodeWatched(uuid, season, episode, nowWatched)
+      .then(function () { return refreshSeriesInLists(uuid); })
+      .catch(function (err) {
+        // revert the optimistic UI if the write actually failed
+        row.classList.toggle("watched", !nowWatched);
+        if (epObj) { epObj.is_watched = !nowWatched; epObj.watched_at = nowWatched ? null : epObj.watched_at; }
+        if (seriesMeta) seriesMeta.watched_episodes += nowWatched ? -1 : 1;
+        showToast("Erro ao atualizar episódio");
+        console.error(err);
+      });
+  }
+
+  function openMovieDetail(uuid) {
+    var screen = document.getElementById("detail-screen");
+    var body = document.getElementById("detail-body");
+    var movie = state.moviesRaw.filter(function (m) { return m.uuid === uuid; })[0];
+    if (!movie) return;
+
+    body.innerHTML = '<div class="detail-loading">Carregando…</div>';
+    screen.classList.add("show");
+    screen.setAttribute("data-kind", "movie");
+    screen.setAttribute("data-id", uuid);
+
+    (movie.tvdb_id ? fetchMovieExtendedInfo(movie.tvdb_id) : Promise.resolve(null)).then(function (extended) {
+      if (screen.getAttribute("data-id") !== uuid) return;
+      renderMovieDetail(movie, extended);
+    }).catch(function (err) {
+      body.innerHTML = '<div class="detail-empty">Erro ao carregar detalhes deste filme.</div>';
+      console.error(err);
+    });
+  }
+
+  function renderMovieDetail(movie, extended) {
+    var body = document.getElementById("detail-body");
+    var title = movie.title || "Sem título";
+    var seed = colorSeed(title);
+
+    var badges = [];
+    if (extended && extended.status) badges.push(extended.status);
+    if (extended && extended.year) badges.push(String(extended.year));
+    else if (movie.year) badges.push(String(movie.year));
+    if (extended && extended.runtime) badges.push(extended.runtime + " min");
+    if (extended) badges = badges.concat((extended.genres || []).slice(0, 3));
+
+    var heroImage = extended && extended.image;
+    var overview = (extended && extended.overview) || "Sinopse não disponível.";
+    var studioLine = extended && extended.studio;
+
+    body.innerHTML =
+      '<div class="detail-hero" style="' + (heroImage ? "background-image:url('" + heroImage.replace(/'/g, "\\'") + "')" : posterStyle(seed[0], seed[1])) + '">' +
+        '<div class="detail-hero-fade"></div>' +
+        '<div class="detail-hero-info">' +
+          '<div class="detail-title">' + escapeHtml(title) + '</div>' +
+          detailBadgesHtml(badges) +
+          (studioLine ? '<div class="detail-progress">' + escapeHtml(studioLine) + '</div>' : '') +
+        '</div>' +
+      '</div>' +
+      '<div class="detail-section">' +
+        '<div class="detail-overview">' + escapeHtml(overview) + '</div>' +
+        '<button id="movie-watch-toggle" class="movie-watch-btn' + (movie.is_watched ? ' watched' : '') + '">' +
+          (movie.is_watched ? "Assistido ✓" : "Marcar como assistido") +
+        '</button>' +
+        '<button id="remove-from-library-btn" class="remove-from-library-btn">Remover da minha lista</button>' +
+      '</div>';
+
+    document.getElementById("movie-watch-toggle").addEventListener("click", function () {
+      var btn = this;
+      var nowWatched = !movie.is_watched;
+      movie.is_watched = nowWatched;
+      movie.watched_at = nowWatched ? new Date().toISOString() : null;
+      btn.classList.toggle("watched", nowWatched);
+      btn.textContent = nowWatched ? "Assistido ✓" : "Marcar como assistido";
+
+      patchMovieWatched(movie.uuid, nowWatched).catch(function (err) {
+        movie.is_watched = !nowWatched;
+        movie.watched_at = nowWatched ? null : movie.watched_at;
+        btn.classList.toggle("watched", !nowWatched);
+        btn.textContent = !nowWatched ? "Assistido ✓" : "Marcar como assistido";
+        showToast("Erro ao atualizar filme");
+        console.error(err);
+      });
+    });
+
+    document.getElementById("remove-from-library-btn").addEventListener("click", function () {
+      handleRemoveClick(this, "movie", movie.uuid, title);
+    });
+  }
+
+  function setupDetailScreen() {
+    document.getElementById("detail-back").addEventListener("click", closeDetailScreen);
+    document.getElementById("detail-body").addEventListener("click", handleDetailBodyClick);
+  }
+
+  // ---------- Remove a title from the library ----------
+  function deleteRow(table, uuid) {
+    return fetch(SUPABASE_CONFIG.url + "/rest/v1/" + table + "?uuid=eq." + uuid, {
+      method: "DELETE",
+      headers: authHeaders({ Prefer: "return=minimal" })
+    }).then(function (r) {
+      handleAuthFailure(r);
+      if (!r.ok) return r.text().then(function (t) { throw new Error("Falha ao remover: " + t); });
+    });
+  }
+
+  function removeSeriesFromState(uuid) {
+    state.seriesProgress = state.seriesProgress.filter(function (s) { return s.uuid !== uuid; });
+    state.seriesSearchStats = state.seriesSearchStats.filter(function (s) { return s.uuid !== uuid; });
+    state.minhaLista = state.minhaLista.filter(function (i) { return i.id !== uuid; });
+    state.emBreve = state.emBreve.filter(function (i) { return i.id !== uuid; });
+    state.assistidos = state.assistidos.filter(function (i) { return i.id !== uuid; });
+    delete state.seriesDetailCache[uuid];
+  }
+
+  function removeMovieFromState(uuid) {
+    state.moviesRaw = state.moviesRaw.filter(function (m) { return m.uuid !== uuid; });
+  }
+
+  function handleRemoveClick(btn, kind, uuid, title) {
+    var confirmed = window.confirm(
+      'Remover "' + title + '" da sua lista?\nIsso apaga o título e ' +
+      (kind === "series" ? "todos os episódios marcados" : "o registro") +
+      " permanentemente. Essa ação não pode ser desfeita."
+    );
+    if (!confirmed) return;
+
+    btn.disabled = true;
+    btn.textContent = "Removendo…";
+
+    deleteRow(kind === "series" ? "series" : "movies", uuid).then(function () {
+      if (kind === "series") removeSeriesFromState(uuid);
+      else removeMovieFromState(uuid);
+
+      closeDetailScreen();
+      renderList(true);
+      renderSearchResults(document.getElementById("search-input").value);
+      showToast('"' + title + '" removido da sua lista');
+    }).catch(function (err) {
+      btn.disabled = false;
+      btn.textContent = "Remover da minha lista";
+      showToast("Erro ao remover título");
+      console.error(err);
+    });
+  }
+
+  // ---------- Add new titles from TheTVDB ----------
+  function tvdbSearchOnline(query) {
+    if (!TVDB_CONFIG || !TVDB_CONFIG.apiKey) return Promise.resolve([]);
+    return getTvdbToken().then(function (token) {
+      if (!token) return [];
+      return fetch(TVDB_API_BASE + "/search?query=" + encodeURIComponent(query) + "&limit=12", {
+        headers: { Authorization: "Bearer " + token }
+      }).then(function (r) { return r.ok ? r.json() : { data: [] }; });
+    }).then(function (json) {
+      return (json.data || []).filter(function (r) { return r.type === "series" || r.type === "movie"; });
+    }).catch(function (err) {
+      console.error(err);
+      return [];
+    });
+  }
+
+  function generateUuid() {
+    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
+      var r = (Math.random() * 16) | 0, v = c === "x" ? r : (r & 0x3) | 0x8;
+      return v.toString(16);
+    });
+  }
+
+  function insertRows(table, rows) {
+    if (!rows.length) return Promise.resolve();
+    return fetch(SUPABASE_CONFIG.url + "/rest/v1/" + table, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json", Prefer: "return=minimal" }),
+      body: JSON.stringify(rows)
+    }).then(function (r) {
+      handleAuthFailure(r);
+      if (!r.ok) return r.text().then(function (t) { throw new Error("Falha ao inserir em " + table + ": " + t); });
+    });
+  }
+
+  // The plain "/episodes/default" list returns names/overviews in the
+  // show's original language. Fetch the Portuguese and English localized
+  // variants instead (same episodes, just localized names) and merge,
+  // so nothing in another language ever gets written to our tables.
+  function fetchTvdbEpisodesLang(tvdbId, lang) {
+    var all = [];
+    function fetchPage(page) {
+      return getTvdbToken().then(function (token) {
+        return fetch(TVDB_API_BASE + "/series/" + tvdbId + "/episodes/default/" + lang + "?page=" + page, {
+          headers: { Authorization: "Bearer " + token }
+        }).then(function (r) { return r.ok ? r.json() : { data: { episodes: [] } }; });
+      }).then(function (json) {
+        all = all.concat((json.data && json.data.episodes) || []);
+        if (json.links && json.links.next) return fetchPage(page + 1);
+        return all;
+      }).catch(function () { return all; });
+    }
+    return fetchPage(0);
+  }
+
+  function fetchTvdbSeriesEpisodes(tvdbId) {
+    return Promise.all([
+      fetchTvdbEpisodesLang(tvdbId, "por"),
+      fetchTvdbEpisodesLang(tvdbId, "eng")
+    ]).then(function (results) {
+      var ptList = results[0], enList = results[1];
+      var enById = {};
+      enList.forEach(function (ep) { enById[ep.id] = ep; });
+      var base = ptList.length ? ptList : enList;
+      return base.map(function (ep) {
+        var en = enById[ep.id];
+        return {
+          id: ep.id,
+          seasonNumber: ep.seasonNumber,
+          number: ep.number,
+          name: ep.name || (en && en.name) || null
+        };
+      });
+    });
+  }
+
+  // Adds a series (with all its seasons/episodes) discovered via TheTVDB
+  // search into our own tables, so it behaves exactly like an imported title
+  // from then on. No-ops and reuses the existing row if already present.
+  function addSeriesFromTvdb(tvdbId, name) {
+    return fetchOne("series", "select=uuid&tvdb_id=eq." + tvdbId).then(function (existing) {
+      if (existing && existing.length) return existing[0].uuid;
+
+      return fetchTvdbSeriesEpisodes(tvdbId).then(function (episodes) {
+        var uuid = generateUuid();
+        var seasonNumbers = {};
+        episodes.forEach(function (ep) { seasonNumbers[ep.seasonNumber] = true; });
+        var seasonRows = Object.keys(seasonNumbers).map(function (n) {
+          return { series_uuid: uuid, number: parseInt(n, 10), is_specials: parseInt(n, 10) === 0 };
+        });
+        var episodeRows = episodes.map(function (ep) {
+          return {
+            series_uuid: uuid,
+            season_number: ep.seasonNumber,
+            tvdb_id: ep.id,
+            number: ep.number,
+            name: ep.name,
+            special: ep.seasonNumber === 0,
+            is_watched: false,
+            watched_at: null,
+            rewatch_count: 0,
+            watched_count: 0
+          };
+        });
+
+        return insertRows("series", [{
+          uuid: uuid, tvdb_id: parseInt(tvdbId, 10), title: name, status: null,
+          is_favorite: false, created_at: new Date().toISOString()
+        }])
+          .then(function () { return insertRows("seasons", seasonRows); })
+          .then(function () { return insertRows("episodes", episodeRows); })
+          .then(function () { return uuid; });
+      });
+    });
+  }
+
+  function addMovieFromTvdb(tvdbId, name, year) {
+    return fetchOne("movies", "select=uuid&tvdb_id=eq." + tvdbId).then(function (existing) {
+      if (existing && existing.length) return existing[0].uuid;
+      var uuid = generateUuid();
+      return insertRows("movies", [{
+        uuid: uuid, tvdb_id: parseInt(tvdbId, 10), title: name, year: year ? parseInt(year, 10) : null,
+        created_at: new Date().toISOString(), watched_at: null, is_watched: false,
+        is_favorite: false, rewatch_count: 0
+      }]).then(function () { return uuid; });
+    });
+  }
+
+  function refreshLibraryAfterAdd(kind, uuid, title, tvdbId) {
+    if (kind === "series") {
+      return refreshSeriesInLists(uuid).then(function () {
+        return fetchOne("series_search_stats", "select=*&uuid=eq." + uuid);
+      }).then(function (rows) {
+        if (rows && rows[0]) state.seriesSearchStats.push(rows[0]);
+      });
+    }
+    return fetchOne("movies", "select=*&uuid=eq." + uuid).then(function (rows) {
+      if (rows && rows[0]) state.moviesRaw.push(rows[0]);
+    });
+  }
+
+  function openAddPreview(kind, tvdbId, name, year) {
+    var screen = document.getElementById("detail-screen");
+    var body = document.getElementById("detail-body");
+
+    body.innerHTML = '<div class="detail-loading">Carregando…</div>';
+    screen.classList.add("show");
+    screen.setAttribute("data-kind", "add-" + kind);
+    screen.setAttribute("data-tvdb-id", tvdbId);
+
+    var fetchFn = kind === "series" ? fetchSeriesExtendedInfo : fetchMovieExtendedInfo;
+    fetchFn(tvdbId).then(function (extended) {
+      if (screen.getAttribute("data-tvdb-id") !== String(tvdbId)) return;
+      renderAddPreview(kind, tvdbId, name, year, extended);
+    }).catch(function (err) {
+      body.innerHTML = '<div class="detail-empty">Erro ao carregar informações.</div>';
+      console.error(err);
+    });
+  }
+
+  function renderAddPreview(kind, tvdbId, name, year, extended) {
+    var body = document.getElementById("detail-body");
+    var title = (extended && extended.name) || name || "Sem título";
+    var seed = colorSeed(title);
+
+    var badges = [];
+    if (extended && extended.status) badges.push(extended.status);
+    if (extended && extended.year) badges.push(String(extended.year));
+    else if (year) badges.push(String(year));
+    if (extended && extended.runtime) badges.push(extended.runtime + (kind === "series" ? " min/ep" : " min"));
+    if (extended) badges = badges.concat((extended.genres || []).slice(0, 3));
+
+    var heroImage = extended && extended.image;
+    var overview = (extended && extended.overview) || "Sinopse não disponível.";
+    var studioLine = extended && extended.studio;
+
+    body.innerHTML =
+      '<div class="detail-hero" style="' + (heroImage ? "background-image:url('" + heroImage.replace(/'/g, "\\'") + "')" : posterStyle(seed[0], seed[1])) + '">' +
+        '<div class="detail-hero-fade"></div>' +
+        '<div class="detail-hero-info">' +
+          '<div class="detail-title">' + escapeHtml(title) + '</div>' +
+          detailBadgesHtml(badges) +
+          (studioLine ? '<div class="detail-progress">' + escapeHtml(studioLine) + '</div>' : '') +
+        '</div>' +
+      '</div>' +
+      '<div class="detail-section">' +
+        '<div class="detail-overview">' + escapeHtml(overview) + '</div>' +
+        '<button id="add-to-library-btn" class="movie-watch-btn">+ Adicionar à minha lista</button>' +
+      '</div>';
+
+    document.getElementById("add-to-library-btn").addEventListener("click", function () {
+      var btn = this;
+      btn.disabled = true;
+      btn.textContent = "Adicionando…";
+
+      var addPromise = kind === "series"
+        ? addSeriesFromTvdb(tvdbId, title)
+        : addMovieFromTvdb(tvdbId, title, (extended && extended.year) || year);
+
+      addPromise.then(function (uuid) {
+        return refreshLibraryAfterAdd(kind, uuid, title, tvdbId).then(function () {
+          renderList(true);
+          if (kind === "series") openSeriesDetail(uuid);
+          else openMovieDetail(uuid);
+        });
+      }).catch(function (err) {
+        btn.disabled = false;
+        btn.textContent = "+ Adicionar à minha lista";
+        showToast("Erro ao adicionar título");
+        console.error(err);
+      });
+    });
+  }
+
+  function closeEpisodeModal() {
+    var modal = document.getElementById("episode-modal");
+    modal.classList.remove("show");
+  }
+
+  function openEpisodeModal(item) {
+    var modal = document.getElementById("episode-modal");
+    var body = document.getElementById("episode-modal-body");
+
+    body.innerHTML =
+      '<div class="episode-modal-header">' +
+        '<span class="pill">( ' + escapeHtml((item.title || "").toUpperCase()) + ' )</span>' +
+        '<div class="episode-line">' + iconTv() + ' T' + pad2(item.season) + ' | E' + pad2(item.episode) + '</div>' +
+        '<div class="episode-modal-title">' + escapeHtml(item.episodeName || "") + '</div>' +
+      '</div>' +
+      '<div class="episode-modal-loading">Carregando informações…</div>';
+
+    modal.classList.add("show");
+
+    if (!item.episodeTvdbId) {
+      document.querySelector("#episode-modal .episode-modal-loading").textContent =
+        "Sem informações adicionais disponíveis para este episódio.";
+      return;
+    }
+
+    fetchEpisodeDetails(item.episodeTvdbId).then(function (details) {
+      if (!modal.classList.contains("show")) return; // user closed it meanwhile
+      var loadingEl = body.querySelector(".episode-modal-loading");
+      if (!details) {
+        if (loadingEl) loadingEl.textContent = "Não foi possível carregar informações deste episódio.";
+        return;
+      }
+
+      var airedLine = formatAiredDate(details.aired);
+      var metaParts = [];
+      if (airedLine) metaParts.push(airedLine);
+      if (details.runtime) metaParts.push(details.runtime + " min");
+
+      var extra = document.createElement("div");
+      extra.className = "episode-modal-extra";
+      extra.innerHTML =
+        (details.image ? '<img class="episode-modal-image" src="' + details.image.replace(/"/g, "&quot;") + '" alt="">' : "") +
+        (metaParts.length ? '<div class="episode-modal-meta">' + escapeHtml(metaParts.join(" · ")) + '</div>' : "") +
+        '<div class="episode-modal-overview">' + escapeHtml(details.overview || "Sinopse não disponível.") + '</div>';
+
+      if (loadingEl) loadingEl.replaceWith(extra);
     });
   }
 
@@ -935,13 +1521,13 @@
     if (reset) {
       state.assistidosOffset = 0;
       state.assistidosHasMore = true;
-      state.assistidos = getLocallyWatchedExtras();
+      state.assistidos = [];
     }
     if (!state.assistidosHasMore) return Promise.resolve();
 
     state.assistidosLoading = true;
     var from = state.assistidosOffset;
-    var to = from + PAGE_SIZE * 3 - 1; // overfetch a bit to absorb locally-unmarked corrections
+    var to = from + PAGE_SIZE - 1;
     return fetch(
       SUPABASE_CONFIG.url + "/rest/v1/episodes_watched_feed?select=*",
       { headers: authHeaders({ Range: from + "-" + to }) }
@@ -959,14 +1545,13 @@
       rows.forEach(function (row) {
         var key = episodeKey(row.series_uuid, row.season_number, row.number);
         if (existingKeys[key]) return;
-        var ov = overrides.episodes[key];
-        if (ov && typeof ov === "object" && ov.watched === false) return; // locally corrected to unwatched
 
         var seed = colorSeed(row.series_title || "?");
         state.assistidos.push({
           id: row.series_uuid,
           title: row.series_title || "Sem título",
           tvdbId: row.tvdb_id,
+          episodeTvdbId: row.episode_tvdb_id,
           season: row.season_number,
           episode: row.number,
           episodeName: row.name || ("Episódio " + row.number),
@@ -1050,17 +1635,11 @@
       state.listsRaw = data.lists;
       state.profileStats = data.profileStats;
 
-      applyOverridesToMovies(state.moviesRaw);
-
       var built = buildHomeListsFromProgress(state.seriesProgress);
       state.minhaLista = built.minhaLista;
       state.emBreve = built.emBreve;
 
-      return applyOverriddenSeriesToLists(built).then(function (finalLists) {
-        state.minhaLista = finalLists.minhaLista;
-        state.emBreve = finalLists.emBreve;
-        return loadAssistidosPage(true);
-      });
+      return loadAssistidosPage(true);
     }).then(function () {
       renderList(true);
       renderLists();
@@ -1077,6 +1656,7 @@
     setupHomeControls();
     setupBottomNav();
     setupSearch();
+    setupDetailScreen();
     setupLoginForm();
 
     if (!SUPABASE_CONFIG || !SUPABASE_CONFIG.url || !SUPABASE_CONFIG.anonKey) {

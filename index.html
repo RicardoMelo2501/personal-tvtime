@@ -95,6 +95,24 @@
 
 <div id="toast" class="toast"></div>
 
+<div id="episode-modal" class="episode-modal">
+  <div class="episode-modal-backdrop"></div>
+  <div class="episode-modal-sheet">
+    <button id="episode-modal-close" class="episode-modal-close" title="Fechar" aria-label="Fechar">&times;</button>
+    <div id="episode-modal-body"></div>
+  </div>
+</div>
+
+<div id="detail-screen" class="detail-screen">
+  <header class="detail-header">
+    <button id="detail-back" class="detail-back" title="Voltar" aria-label="Voltar">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"></path></svg>
+    </button>
+    <span class="detail-header-title">Detalhes</span>
+  </header>
+  <div id="detail-body" class="detail-body"></div>
+</div>
+
 <script src="config.js"></script>
 <script src="app.js"></script>
 </body>
