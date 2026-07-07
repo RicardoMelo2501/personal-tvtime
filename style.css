@@ -28,6 +28,88 @@ html, body {
   box-shadow: 0 0 24px rgba(0,0,0,0.15);
 }
 
+/* Login */
+.login-screen {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--black);
+}
+.login-box {
+  width: 100%;
+  max-width: 340px;
+  text-align: center;
+}
+.login-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  background: rgba(255,255,255,0.08);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 18px auto;
+}
+.login-box h1 {
+  color: #fff;
+  font-size: 20px;
+  margin: 0 0 4px 0;
+}
+.login-sub {
+  color: #9a9a9e;
+  font-size: 13.5px;
+  margin: 0 0 24px 0;
+}
+#login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+#login-form input {
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid #2a2a2e;
+  background: #1a1a1d;
+  color: #fff;
+  font-size: 14px;
+  outline: none;
+}
+#login-form input::placeholder { color: #6b6b70; }
+#login-form input:focus { border-color: #5a5a60; }
+.login-submit {
+  padding: 12px;
+  border-radius: 10px;
+  border: none;
+  background: #fff;
+  color: #111;
+  font-weight: 700;
+  font-size: 14px;
+  cursor: pointer;
+  margin-top: 4px;
+}
+.login-submit:disabled { opacity: 0.6; cursor: default; }
+.login-error {
+  min-height: 16px;
+  color: #ff6b6b;
+  font-size: 12.5px;
+}
+
+.logout-btn {
+  width: 100%;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-weight: 700;
+  font-size: 14px;
+  cursor: pointer;
+  margin-top: 8px;
+}
+
 .screen {
   display: none;
   flex: 1;
@@ -476,4 +558,5 @@ html, body {
   .stale-flag { background: #2a2a2e; color: #cfcfd2; }
   .nav-btn.active { color: #fff; }
   .empty-state, .episode-title, .stat-label, .list-card-count, .export-hint, .search-sub { color: #a0a0a5; }
+  .logout-btn { border-color: #2a2a2e; color: #a0a0a5; }
 }

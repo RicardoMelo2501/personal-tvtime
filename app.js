@@ -7,12 +7,14 @@
 
   var TVDB_API_BASE = "https://api4.thetvdb.com/v4";
   var TVDB_TOKEN_KEY = "tvtime_clone_tvdb_token_v1";
+  var AUTH_SESSION_KEY = "tvtime_clone_auth_session_v1";
 
   var TODAY = new Date();
   var OVERRIDES_KEY = "tvtime_clone_overrides_v1";
   var PAGE_SIZE = 8;
 
   var state = {
+    authSession: null,
     seriesProgress: [],
     seriesSearchStats: [],
     moviesRaw: [],
@@ -30,6 +32,84 @@
     renderedCount: 0,
     loadingMore: false
   };
+
+  // ---------- Supabase Auth ----------
+  // Data access requires an authenticated session now (RLS denies the anon
+  // key entirely). The user/password pair lives in Supabase Auth, not in
+  // our own tables — we just exchange them for a session via the GoTrue
+  // REST API, same approach used for the raw PostgREST calls elsewhere.
+  function loadAuthSession() {
+    try {
+      return JSON.parse(localStorage.getItem(AUTH_SESSION_KEY) || "null");
+    } catch (e) { return null; }
+  }
+  function saveAuthSession(session) {
+    localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(session));
+  }
+  function clearAuthSession() {
+    localStorage.removeItem(AUTH_SESSION_KEY);
+  }
+
+  function authRequest(path, body) {
+    return fetch(SUPABASE_CONFIG.url + path, {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_CONFIG.anonKey,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      return r.json().then(function (json) {
+        if (!r.ok) {
+          throw new Error(json.error_description || json.msg || "Falha na autenticação");
+        }
+        return json;
+      });
+    });
+  }
+
+  function toSession(json) {
+    return {
+      accessToken: json.access_token,
+      refreshToken: json.refresh_token,
+      expiresAt: Date.now() + json.expires_in * 1000
+    };
+  }
+
+  function loginWithPassword(email, password) {
+    return authRequest("/auth/v1/token?grant_type=password", { email: email, password: password })
+      .then(function (json) {
+        var session = toSession(json);
+        saveAuthSession(session);
+        return session;
+      });
+  }
+
+  function refreshAuthSession(session) {
+    return authRequest("/auth/v1/token?grant_type=refresh_token", { refresh_token: session.refreshToken })
+      .then(function (json) {
+        var refreshed = toSession(json);
+        saveAuthSession(refreshed);
+        return refreshed;
+      });
+  }
+
+  // Resolves to a valid session, refreshing a near-expired one, or null if
+  // the user needs to log in (no session, or refresh failed/was revoked).
+  function ensureAuthSession() {
+    var session = loadAuthSession();
+    if (!session) return Promise.resolve(null);
+    if (session.expiresAt - 60000 > Date.now()) return Promise.resolve(session);
+    return refreshAuthSession(session).catch(function () {
+      clearAuthSession();
+      return null;
+    });
+  }
+
+  function logout() {
+    clearAuthSession();
+    location.reload();
+  }
 
   // ---------- Overrides (localStorage) ----------
   // Overrides store local corrections that never get written back to
@@ -652,7 +732,10 @@
         statCard(stats.series_continuing, "Em andamento") +
         statCard(stats.series_stopped, "Paradas") +
         statCard(stats.series_not_started, "Não iniciadas") +
-      '</div>';
+      '</div>' +
+      '<button id="logout-btn" class="logout-btn">Sair</button>';
+
+    document.getElementById("logout-btn").addEventListener("click", logout);
   }
 
   function statCard(value, label) {
@@ -660,17 +743,30 @@
   }
 
   // ---------- Supabase data fetching ----------
+  function authHeaders(extra) {
+    var token = (state.authSession && state.authSession.accessToken) || SUPABASE_CONFIG.anonKey;
+    var headers = { apikey: SUPABASE_CONFIG.anonKey, Authorization: "Bearer " + token };
+    if (extra) for (var k in extra) headers[k] = extra[k];
+    return headers;
+  }
+
+  function handleAuthFailure(r) {
+    if (r.status === 401 || r.status === 403) {
+      clearAuthSession();
+      location.reload();
+      throw new Error("Sessão expirada, faça login novamente.");
+    }
+    return r;
+  }
+
   function fetchAllRows(table, query) {
     var all = [];
     function fetchPage(from) {
       var url = SUPABASE_CONFIG.url + "/rest/v1/" + table + "?" + query;
       return fetch(url, {
-        headers: {
-          apikey: SUPABASE_CONFIG.anonKey,
-          Authorization: "Bearer " + SUPABASE_CONFIG.anonKey,
-          Range: from + "-" + (from + REST_PAGE_SIZE - 1)
-        }
+        headers: authHeaders({ Range: from + "-" + (from + REST_PAGE_SIZE - 1) })
       }).then(function (r) {
+        handleAuthFailure(r);
         if (!r.ok) throw new Error("Falha ao carregar " + table);
         return r.json();
       }).then(function (chunk) {
@@ -686,12 +782,8 @@
 
   function fetchOne(table, query) {
     var url = SUPABASE_CONFIG.url + "/rest/v1/" + table + "?" + query;
-    return fetch(url, {
-      headers: {
-        apikey: SUPABASE_CONFIG.anonKey,
-        Authorization: "Bearer " + SUPABASE_CONFIG.anonKey
-      }
-    }).then(function (r) {
+    return fetch(url, { headers: authHeaders() }).then(function (r) {
+      handleAuthFailure(r);
       if (!r.ok) throw new Error("Falha ao carregar " + table);
       return r.json();
     });
@@ -852,14 +944,9 @@
     var to = from + PAGE_SIZE * 3 - 1; // overfetch a bit to absorb locally-unmarked corrections
     return fetch(
       SUPABASE_CONFIG.url + "/rest/v1/episodes_watched_feed?select=*",
-      {
-        headers: {
-          apikey: SUPABASE_CONFIG.anonKey,
-          Authorization: "Bearer " + SUPABASE_CONFIG.anonKey,
-          Range: from + "-" + to
-        }
-      }
+      { headers: authHeaders({ Range: from + "-" + to }) }
     ).then(function (r) {
+      handleAuthFailure(r);
       if (!r.ok) throw new Error("Falha ao carregar episódios assistidos");
       return r.json();
     }).then(function (rows) {
@@ -917,19 +1004,42 @@
   }
 
   // ---------- Boot ----------
-  function init() {
-    setupHomeControls();
-    setupBottomNav();
-    setupSearch();
+  function showLoginScreen() {
+    document.getElementById("login-screen").style.display = "flex";
+    document.querySelector(".phone").style.display = "none";
+  }
+  function showApp() {
+    document.getElementById("login-screen").style.display = "none";
+    document.querySelector(".phone").style.display = "flex";
+  }
 
-    if (!SUPABASE_CONFIG || !SUPABASE_CONFIG.url || !SUPABASE_CONFIG.anonKey) {
-      document.getElementById("list-container").innerHTML =
-        '<div class="empty-state">Configuração do Supabase não encontrada.' +
-        '<br><br>Copie ".env.example" para ".env", preencha as credenciais e rode ' +
-        '<code>node scripts/generate-config.js</code> para gerar o config.js.</div>';
-      return;
-    }
+  function setupLoginForm() {
+    document.getElementById("login-form").addEventListener("submit", function (e) {
+      e.preventDefault();
+      var email = document.getElementById("login-email").value.trim();
+      var password = document.getElementById("login-password").value;
+      var errorEl = document.getElementById("login-error");
+      var btn = e.target.querySelector(".login-submit");
 
+      errorEl.textContent = "";
+      btn.disabled = true;
+      btn.textContent = "Entrando…";
+
+      loginWithPassword(email, password).then(function (session) {
+        state.authSession = session;
+        showApp();
+        startApp();
+      }).catch(function (err) {
+        errorEl.textContent = "E-mail ou senha inválidos.";
+        console.error(err);
+      }).then(function () {
+        btn.disabled = false;
+        btn.textContent = "Entrar";
+      });
+    });
+  }
+
+  function startApp() {
     document.getElementById("list-container").innerHTML =
       '<div class="empty-state">Carregando dados…</div>';
 
@@ -963,5 +1073,38 @@
     });
   }
 
+  function init() {
+    setupHomeControls();
+    setupBottomNav();
+    setupSearch();
+    setupLoginForm();
+
+    if (!SUPABASE_CONFIG || !SUPABASE_CONFIG.url || !SUPABASE_CONFIG.anonKey) {
+      document.getElementById("login-error").textContent =
+        "Configuração do Supabase não encontrada. Copie .env.example para .env, preencha as credenciais e rode node scripts/generate-config.js.";
+      showLoginScreen();
+      return;
+    }
+
+    ensureAuthSession().then(function (session) {
+      if (!session) {
+        showLoginScreen();
+        return;
+      }
+      state.authSession = session;
+      showApp();
+      startApp();
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", init);
+
+  // ---------- PWA install support ----------
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", function () {
+      navigator.serviceWorker.register("sw.js").catch(function (err) {
+        console.error("Falha ao registrar service worker:", err);
+      });
+    });
+  }
 })();

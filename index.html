@@ -4,10 +4,39 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>TV Time Clone</title>
+
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#111113">
+
+<link rel="icon" href="icons/favicon-32.png" sizes="32x32" type="image/png">
+<link rel="icon" href="icons/favicon-16.png" sizes="16x16" type="image/png">
+
+<!-- iOS "Add to Home Screen" ignores the manifest; it only reads these -->
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="TV Time">
+
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<div class="phone">
+<div id="login-screen" class="login-screen">
+  <div class="login-box">
+    <div class="login-icon">
+      <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="14" rx="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="18" x2="12" y2="21"></line></svg>
+    </div>
+    <h1>TV Time Clone</h1>
+    <p class="login-sub">Entre para ver sua lista</p>
+    <form id="login-form" autocomplete="on">
+      <input id="login-email" type="email" placeholder="E-mail" autocomplete="username" required>
+      <input id="login-password" type="password" placeholder="Senha" autocomplete="current-password" required>
+      <button type="submit" class="login-submit">Entrar</button>
+      <div id="login-error" class="login-error"></div>
+    </form>
+  </div>
+</div>
+
+<div class="phone" style="display:none;">
 
   <div id="screen-home" class="screen active">
     <header class="app-header">
