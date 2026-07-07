@@ -27,6 +27,7 @@
     assistidosHasMore: true,
     assistidosLoading: false,
     activeTab: "minha-lista",
+    activeProgressStatus: "all",
     gridView: false,
     renderedCount: 0,
     loadingMore: false
@@ -675,6 +676,92 @@
 
   function statCard(value, label) {
     return '<div class="stat-card"><div class="stat-value">' + value + '</div><div class="stat-label">' + escapeHtml(label) + '</div></div>';
+  }
+
+  // ---------- Progress screen ----------
+  function buildProgressList(statusFilter) {
+    var statsByUuid = {};
+    state.seriesSearchStats.forEach(function (s) { statsByUuid[s.uuid] = s; });
+
+    var list = [];
+    state.seriesProgress.forEach(function (s) {
+      if (s.status === "not_started_yet") return;
+      if (statusFilter !== "all" && s.status !== statusFilter) return;
+
+      var stats = statsByUuid[s.uuid];
+      var total = stats ? stats.total_episodes : 0;
+      var watched = stats ? stats.watched_episodes : 0;
+      if (!total) return;
+
+      var seed = colorSeed(s.title || "?");
+      list.push({
+        id: s.uuid,
+        title: s.title || "Sem título",
+        tvdbId: s.tvdb_id,
+        status: s.status,
+        watched: watched,
+        total: total,
+        pct: Math.round((watched / total) * 100),
+        lastActivity: s.last_watched_at || s.created_at,
+        hue1: seed[0],
+        hue2: seed[1]
+      });
+    });
+
+    list.sort(function (a, b) { return (b.lastActivity || "").localeCompare(a.lastActivity || ""); });
+    return list;
+  }
+
+  function progressStatusLabel(status) {
+    if (status === "continuing") return "Assistindo";
+    if (status === "stopped") return "Parada";
+    if (status === "up_to_date") return "Completa";
+    return "";
+  }
+
+  function progressCard(item) {
+    var wrap = document.createElement("div");
+    wrap.className = "progress-card";
+    wrap.setAttribute("data-id", item.id);
+    wrap.innerHTML =
+      '<div class="progress-card-poster" style="' + posterStyle(item.hue1, item.hue2) + '">' + escapeHtml(initials(item.title)) + '</div>' +
+      '<div class="progress-card-info">' +
+        '<div class="progress-card-title">' + escapeHtml(item.title) + '</div>' +
+        '<div class="progress-card-meta">' +
+          '<span class="progress-status-badge progress-status-' + escapeHtml(item.status) + '">' + escapeHtml(progressStatusLabel(item.status)) + '</span>' +
+          '<span class="progress-count">' + item.watched + '/' + item.total + ' episódios</span>' +
+        '</div>' +
+        '<div class="progress-bar-track"><div class="progress-bar-fill" style="width:' + item.pct + '%"></div></div>' +
+      '</div>';
+    applyPosterArtwork(wrap.querySelector(".progress-card-poster"), item.tvdbId);
+    return wrap;
+  }
+
+  function renderProgressList() {
+    var container = document.getElementById("progress-container");
+    var list = buildProgressList(state.activeProgressStatus);
+    container.innerHTML = "";
+    if (!list.length) {
+      container.innerHTML = '<div class="empty-state">Nenhuma série encontrada.</div>';
+      return;
+    }
+    list.forEach(function (item) { container.appendChild(progressCard(item)); });
+  }
+
+  function setupProgressControls() {
+    document.querySelectorAll(".progress-tab").forEach(function (tab) {
+      tab.addEventListener("click", function () {
+        document.querySelectorAll(".progress-tab").forEach(function (t) { t.classList.remove("active"); });
+        tab.classList.add("active");
+        state.activeProgressStatus = tab.getAttribute("data-status");
+        renderProgressList();
+      });
+    });
+
+    document.getElementById("progress-container").addEventListener("click", function (e) {
+      var card = e.target.closest(".progress-card");
+      if (card) openSeriesDetail(card.getAttribute("data-id"));
+    });
   }
 
   // ---------- Supabase data fetching ----------
@@ -1644,6 +1731,7 @@
       renderList(true);
       renderLists();
       renderProfile();
+      renderProgressList();
     }).catch(function (err) {
       document.getElementById("list-container").innerHTML =
         '<div class="empty-state">Erro ao carregar dados do Supabase: ' + escapeHtml(err.message) +
@@ -1657,6 +1745,7 @@
     setupBottomNav();
     setupSearch();
     setupDetailScreen();
+    setupProgressControls();
     setupLoginForm();
 
     if (!SUPABASE_CONFIG || !SUPABASE_CONFIG.url || !SUPABASE_CONFIG.anonKey) {
