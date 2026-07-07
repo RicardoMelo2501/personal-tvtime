@@ -22,6 +22,9 @@
     seriesDetailCache: {},
     minhaLista: [],
     emBreve: [],
+    emBreveUpcoming: [],
+    emBreveLoaded: false,
+    emBreveLoading: false,
     assistidos: [],
     assistidosOffset: 0,
     assistidosHasMore: true,
@@ -292,6 +295,11 @@
       ? '<div class="watched-meta">' + escapeHtml(formatWatchedAt(item.watchedAt)) + '</div>'
       : '<div class="episode-title">' + escapeHtml(item.episodeName) + '</div>';
 
+    var releaseDateHtml = (kind === "em-breve" && item.airedLabel)
+      ? '<div class="release-date-badge"><span class="release-date">' + escapeHtml(item.airedLabel) + '</span>' +
+          '<span class="release-countdown">' + escapeHtml(item.countdownLabel) + '</span></div>'
+      : "";
+
     var actionHtml = kind === "assistidos"
       ? '<button class="undo-btn" title="Corrigir: marcar como não assistido">' + iconUndo() + '</button>'
       : '<button class="check-btn" title="Marcar como assistido">' + iconCheck() + '</button>';
@@ -302,6 +310,7 @@
         '<div class="card-poster" style="' + posterStyle(item.hue1, item.hue2) + '">' + escapeHtml(initials(item.title)) + '</div>' +
         '<div class="card-info">' +
           '<span class="pill">( ' + escapeHtml(item.title.toUpperCase()) + ' )</span>' +
+          releaseDateHtml +
           '<div class="episode-line">' + iconTv() + ' T' + pad2(item.season) + ' | E' + pad2(item.episode) + '</div>' +
           subLineHtml +
           tagsHtml +
@@ -317,7 +326,7 @@
   function getActiveList() {
     if (state.activeTab === "minha-lista") return state.minhaLista;
     if (state.activeTab === "assistidos") return state.assistidos;
-    return state.emBreve;
+    return state.emBreveUpcoming;
   }
 
   function renderList(reset) {
@@ -326,11 +335,20 @@
       container.innerHTML = "";
       state.renderedCount = 0;
     }
+
+    // Always clear a stale indicator up front — if a previous batch threw
+    // partway through rendering, this is what keeps "Carregando" from
+    // getting stuck at the bottom forever.
+    var staleIndicator = container.querySelector(".loading-indicator");
+    if (staleIndicator) staleIndicator.remove();
+
     var list = getActiveList();
 
     if (!list.length) {
       var emptyMsg = state.activeTab === "assistidos"
         ? "Nenhum episódio assistido ainda."
+        : state.activeTab === "em-breve"
+        ? "Nenhum episódio previsto para lançamento em breve."
         : "Nada por aqui ainda.";
       container.innerHTML = '<div class="empty-state">' + emptyMsg + '</div>';
       return;
@@ -338,12 +356,13 @@
 
     var next = list.slice(state.renderedCount, state.renderedCount + PAGE_SIZE);
     next.forEach(function (item) {
-      container.appendChild(renderCard(item, state.activeTab));
+      try {
+        container.appendChild(renderCard(item, state.activeTab));
+      } catch (err) {
+        console.error("Falha ao renderizar item da lista", item, err);
+      }
     });
     state.renderedCount += next.length;
-
-    var oldIndicator = container.querySelector(".loading-indicator");
-    if (oldIndicator) oldIndicator.remove();
 
     var hasMoreLocally = state.renderedCount < list.length;
     var hasMoreRemote = state.activeTab === "assistidos" && state.assistidosHasMore;
@@ -393,6 +412,8 @@
         else if (built.emBreve.length) state.emBreve.push(built.emBreve[0]);
         state.seriesProgress = state.seriesProgress.filter(function (s) { return s.uuid !== uuid; }).concat([row]);
       }
+      state.emBreveLoaded = false;
+      state.emBreveUpcoming = [];
       state.minhaLista.sort(function (a, b) { return (b.lastActivity || "").localeCompare(a.lastActivity || ""); });
       state.emBreve.sort(function (a, b) { return (b.addedAt || "").localeCompare(a.addedAt || ""); });
     });
@@ -479,6 +500,13 @@
         document.querySelectorAll(".tab").forEach(function (t) { t.classList.remove("active"); });
         tab.classList.add("active");
         state.activeTab = tab.getAttribute("data-tab");
+
+        if (state.activeTab === "em-breve" && !state.emBreveLoaded) {
+          document.getElementById("list-container").innerHTML = '<div class="empty-state">Carregando…</div>';
+          loadEmBreveUpcoming().then(function () { renderList(true); });
+          return;
+        }
+
         renderList(true);
       });
     });
@@ -984,6 +1012,58 @@
     return pad2(d.getDate()) + "/" + pad2(d.getMonth() + 1) + "/" + d.getFullYear();
   }
 
+  function daysUntil(dateStr) {
+    var d = new Date(dateStr + "T00:00:00");
+    var today = new Date();
+    today.setHours(0, 0, 0, 0);
+    return Math.round((d - today) / 86400000);
+  }
+  function formatCountdown(diffDays) {
+    if (diffDays <= 0) return "Hoje";
+    if (diffDays === 1) return "Amanhã";
+    return "Em " + diffDays + " dias";
+  }
+
+  // "Em breve" only makes sense as a release calendar: pull each candidate's
+  // air date from TheTVDB (not stored locally) and keep just the ones that
+  // haven't aired yet, so the tab stops mixing in old unwatched pilots.
+  function loadEmBreveUpcoming() {
+    if (state.emBreveLoaded || state.emBreveLoading) return Promise.resolve();
+    state.emBreveLoading = true;
+
+    // Candidates: series never started (their first episode may be an
+    // unaired premiere) plus series already caught up to the latest known
+    // episode (their next pending episode may not be out yet either). Series
+    // sitting on a backlog of already-released episodes are skipped — those
+    // episodes have necessarily already aired, so there's no date to check.
+    var caughtUp = state.minhaLista.filter(function (i) {
+      return i.tags && i.tags.indexOf("MAIS RECENTE") !== -1;
+    });
+    var candidates = state.emBreve.concat(caughtUp).filter(function (i) { return i.episodeTvdbId; });
+
+    return Promise.all(candidates.map(function (item) {
+      return fetchEpisodeDetails(item.episodeTvdbId).then(function (details) {
+        item.airedRaw = (details && details.aired) || null;
+      });
+    })).then(function () {
+      var upcoming = candidates.filter(function (item) {
+        if (!item.airedRaw) return false;
+        return daysUntil(item.airedRaw) >= 0;
+      });
+      upcoming.forEach(function (item) {
+        item.airedLabel = formatAiredDate(item.airedRaw);
+        item.countdownLabel = formatCountdown(daysUntil(item.airedRaw));
+      });
+      upcoming.sort(function (a, b) { return a.airedRaw.localeCompare(b.airedRaw); });
+      state.emBreveUpcoming = upcoming;
+      state.emBreveLoaded = true;
+      state.emBreveLoading = false;
+    }).catch(function (err) {
+      state.emBreveLoading = false;
+      console.error(err);
+    });
+  }
+
   // ---------- Series / movie detail screen ----------
   var tvdbExtendedCache = {};
   function fetchExtendedInfo(kind, tvdbId) {
@@ -1078,6 +1158,7 @@
     var seasons = (detail.seasons || []).slice().sort(function (a, b) { return (a.number || 0) - (b.number || 0); });
     var totalEps = 0, watchedEps = 0;
     seasons.forEach(function (se) {
+      if (se.is_specials) return;
       (se.episodes || []).forEach(function (ep) { totalEps++; if (ep.is_watched) watchedEps++; });
     });
 
@@ -1097,12 +1178,17 @@
       var heading = se.is_specials ? "Especiais" : "Temporada " + se.number;
       var eps = (se.episodes || []).slice().sort(function (a, b) { return (a.number || 0) - (b.number || 0); });
       var rowsHtml = eps.map(function (ep) {
-        return '<div class="episode-row' + (ep.is_watched ? ' watched' : '') + '" data-season="' + se.number + '" data-episode="' + ep.number + '">' +
+        return '<div class="episode-row' + (ep.is_watched ? ' watched' : '') + (se.is_specials ? ' special-row' : '') + '" data-season="' + se.number + '" data-episode="' + ep.number + '">' +
           '<div class="episode-row-number">' + pad2(ep.number) + '</div>' +
           '<div class="episode-row-name">' + escapeHtml(ep.name || ("Episódio " + ep.number)) + '</div>' +
           '<div class="episode-row-check">' + iconCheck() + '</div>' +
         '</div>';
       }).join("");
+      if (se.is_specials) {
+        return '<div class="season-heading season-heading-toggle" data-toggle-specials="1">' + escapeHtml(heading) +
+          ' <span class="specials-count">(' + eps.length + ')</span></div>' +
+          '<div class="episode-row-list specials-list">' + rowsHtml + '</div>';
+      }
       return '<div class="season-heading">' + escapeHtml(heading) + '</div><div class="episode-row-list">' + rowsHtml + '</div>';
     }).join("");
 
@@ -1131,6 +1217,15 @@
   function handleDetailBodyClick(e) {
     var screen = document.getElementById("detail-screen");
     if (screen.getAttribute("data-kind") !== "series") return;
+
+    var toggle = e.target.closest(".season-heading-toggle");
+    if (toggle) {
+      toggle.classList.toggle("expanded");
+      var list = toggle.nextElementSibling;
+      if (list) list.classList.toggle("expanded");
+      return;
+    }
+
     var row = e.target.closest(".episode-row");
     if (!row) return;
 
@@ -1154,8 +1249,8 @@
     row.classList.toggle("watched", nowWatched);
     var countEl = document.getElementById("detail-progress-count");
     if (countEl) {
-      var total = document.querySelectorAll(".episode-row").length;
-      var watched = document.querySelectorAll(".episode-row.watched").length;
+      var total = document.querySelectorAll(".episode-row:not(.special-row)").length;
+      var watched = document.querySelectorAll(".episode-row.watched:not(.special-row)").length;
       countEl.textContent = watched + "/" + total + " episódios assistidos";
     }
 
@@ -1285,6 +1380,7 @@
     state.seriesSearchStats = state.seriesSearchStats.filter(function (s) { return s.uuid !== uuid; });
     state.minhaLista = state.minhaLista.filter(function (i) { return i.id !== uuid; });
     state.emBreve = state.emBreve.filter(function (i) { return i.id !== uuid; });
+    state.emBreveUpcoming = state.emBreveUpcoming.filter(function (i) { return i.id !== uuid; });
     state.assistidos = state.assistidos.filter(function (i) { return i.id !== uuid; });
     delete state.seriesDetailCache[uuid];
   }

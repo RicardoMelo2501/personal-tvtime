@@ -12,6 +12,8 @@
 html, body {
   margin: 0;
   padding: 0;
+  height: 100%;
+  overflow: hidden;
   background: #d8d8db;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   color: var(--text);
@@ -19,12 +21,13 @@ html, body {
 
 .phone {
   max-width: 430px;
-  min-height: 100vh;
+  height: 100vh;
   margin: 0 auto;
   background: var(--bg);
   display: flex;
   flex-direction: column;
   position: relative;
+  overflow: hidden;
   box-shadow: 0 0 24px rgba(0,0,0,0.15);
 }
 
@@ -114,8 +117,9 @@ html, body {
   display: none;
   flex: 1;
   flex-direction: column;
-  min-height: 100vh;
+  min-height: 0;
   padding-bottom: 70px;
+  overflow: hidden;
 }
 .screen.active { display: flex; }
 
@@ -172,7 +176,9 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  scrollbar-width: none;
 }
+.list-container::-webkit-scrollbar { display: none; }
 
 .card-wrap { display: flex; flex-direction: column; }
 
@@ -260,6 +266,28 @@ html, body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.release-date-badge {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 1px 0 2px 0;
+}
+.release-date {
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: 0.2px;
+}
+.release-countdown {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  color: #fff;
+  background: var(--black);
+  padding: 2px 8px;
+  border-radius: 10px;
 }
 
 .tags-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
@@ -457,7 +485,9 @@ html, body {
 .profile-container {
   padding: 18px 16px;
   overflow-y: auto;
+  scrollbar-width: none;
 }
+.profile-container::-webkit-scrollbar { display: none; }
 .stats-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -797,6 +827,22 @@ html, body {
 .episode-row.watched .episode-row-check { background: #fff; border-color: #fff; color: #111; }
 .episode-row.watched .episode-row-name { color: #a0a0a5; }
 
+.season-heading-toggle {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.season-heading-toggle::before {
+  content: "▸";
+  font-size: 10px;
+  transition: transform .15s ease;
+}
+.season-heading-toggle.expanded::before { transform: rotate(90deg); }
+.specials-count { font-weight: 600; color: #6b6b70; }
+.episode-row-list.specials-list { display: none; }
+.episode-row-list.specials-list.expanded { display: flex; }
+
 /* Episode detail modal */
 .episode-modal {
   position: fixed;
@@ -910,6 +956,7 @@ html, body {
   .icon-btn.active { color: #fff; }
   .pill { border-color: #3a3a3e; color: #cfcfd2; }
   .tag-badge { background: #fff; color: #111; }
+  .release-countdown { background: #fff; color: #111; }
   .check-btn { background: #1a1a1d; border-color: #3a3a3e; }
   .check-btn.watched { background: #fff; border-color: #fff; color: #111; }
   .check-btn.confirming { border-color: #fff; color: #fff; }
