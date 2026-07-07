@@ -28,6 +28,7 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          TVDB_API_KEY: ${{ secrets.TVDB_API_KEY }}
         run: node scripts/generate-config.js
 
       - name: Setup Pages

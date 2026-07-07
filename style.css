@@ -130,6 +130,12 @@ html, body {
   font-size: 20px;
   text-align: center;
   padding: 4px;
+  background-size: cover;
+  background-position: center;
+  transition: color .15s;
+}
+.card-poster.has-image {
+  color: transparent;
 }
 
 .card-info {

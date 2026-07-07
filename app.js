@@ -2,19 +2,29 @@
   "use strict";
 
   var SUPABASE_CONFIG = window.SUPABASE_CONFIG || null;
+  var TVDB_CONFIG = window.TVDB_CONFIG || null;
   var REST_PAGE_SIZE = 1000;
+
+  var TVDB_API_BASE = "https://api4.thetvdb.com/v4";
+  var TVDB_TOKEN_KEY = "tvtime_clone_tvdb_token_v1";
 
   var TODAY = new Date();
   var OVERRIDES_KEY = "tvtime_clone_overrides_v1";
   var PAGE_SIZE = 8;
 
   var state = {
-    seriesRaw: [],
+    seriesProgress: [],
+    seriesSearchStats: [],
     moviesRaw: [],
     listsRaw: [],
+    profileStats: null,
+    seriesDetailCache: {},
     minhaLista: [],
     emBreve: [],
     assistidos: [],
+    assistidosOffset: 0,
+    assistidosHasMore: true,
+    assistidosLoading: false,
     activeTab: "minha-lista",
     gridView: false,
     renderedCount: 0,
@@ -22,6 +32,10 @@
   };
 
   // ---------- Overrides (localStorage) ----------
+  // Overrides store local corrections that never get written back to
+  // Supabase (the anon key is read-only by design). They carry enough
+  // display metadata (title/name) so the "Assistidos" tab can render
+  // freshly-marked episodes without an extra round trip.
   function loadOverrides() {
     try {
       var raw = localStorage.getItem(OVERRIDES_KEY);
@@ -37,6 +51,9 @@
 
   function episodeKey(seriesUuid, season, number) {
     return seriesUuid + "|" + season + "|" + number;
+  }
+  function seriesUuidFromKey(key) {
+    return key.split("|")[0];
   }
 
   function applyOverridesToSeries(seriesArr) {
@@ -61,15 +78,51 @@
       });
     });
   }
-  function markEpisodeWatched(seriesUuid, season, number) {
+  function markEpisodeWatched(seriesUuid, season, number, title, name, tvdbId) {
     var key = episodeKey(seriesUuid, season, number);
-    overrides.episodes[key] = { watched: true, at: new Date().toISOString() };
+    overrides.episodes[key] = {
+      watched: true,
+      at: new Date().toISOString(),
+      title: title,
+      season: season,
+      number: number,
+      name: name,
+      tvdbId: tvdbId
+    };
     saveOverrides(overrides);
   }
   function unmarkEpisodeWatched(seriesUuid, season, number) {
     var key = episodeKey(seriesUuid, season, number);
     overrides.episodes[key] = { watched: false };
     saveOverrides(overrides);
+  }
+  function getOverriddenSeriesUuids() {
+    var set = {};
+    Object.keys(overrides.episodes).forEach(function (key) {
+      set[seriesUuidFromKey(key)] = true;
+    });
+    return Object.keys(set);
+  }
+  function getLocallyWatchedExtras() {
+    var arr = [];
+    Object.keys(overrides.episodes).forEach(function (key) {
+      var ov = overrides.episodes[key];
+      if (ov && typeof ov === "object" && ov.watched === true && ov.title) {
+        var seed = colorSeed(ov.title);
+        arr.push({
+          id: seriesUuidFromKey(key),
+          title: ov.title,
+          tvdbId: ov.tvdbId,
+          season: ov.season,
+          episode: ov.number,
+          episodeName: ov.name || ("Episódio " + ov.number),
+          watchedAt: ov.at,
+          hue1: seed[0],
+          hue2: seed[1]
+        });
+      }
+    });
+    return arr;
   }
   function applyOverridesToMovies(moviesArr) {
     moviesArr.forEach(function (m) {
@@ -136,55 +189,24 @@
     }, action ? 4000 : 1800);
   }
 
-  // ---------- Data processing ----------
-  function buildEntries(seriesArr) {
+  // ---------- Data processing: home tabs from the lean series_progress view ----------
+  function buildHomeListsFromProgress(rows) {
     var minhaLista = [];
     var emBreve = [];
 
-    seriesArr.forEach(function (s) {
+    rows.forEach(function (s) {
+      if (s.first_season == null) return; // series with no episode data at all
       var title = s.title || "Sem título";
-      var seasons = (s.seasons || [])
-        .filter(function (se) { return !se.is_specials; })
-        .slice()
-        .sort(function (a, b) { return (a.number || 0) - (b.number || 0); });
-
-      var flat = [];
-      seasons.forEach(function (season) {
-        var eps = (season.episodes || []).slice().sort(function (a, b) {
-          return (a.number || 0) - (b.number || 0);
-        });
-        eps.forEach(function (ep) {
-          flat.push({
-            season: season.number,
-            number: ep.number,
-            name: ep.name || ("Episódio " + ep.number),
-            is_watched: !!ep.is_watched,
-            watched_at: ep.watched_at
-          });
-        });
-      });
-      if (!flat.length) return;
-
-      var watchedEps = flat.filter(function (e) { return e.is_watched; });
-      var unwatchedEps = flat.filter(function (e) { return !e.is_watched; });
-
-      var lastWatchedAt = null;
-      watchedEps.forEach(function (e) {
-        if (e.watched_at && (!lastWatchedAt || e.watched_at > lastWatchedAt)) {
-          lastWatchedAt = e.watched_at;
-        }
-      });
-
       var seed = colorSeed(title);
 
-      if (!watchedEps.length) {
-        var firstEp = flat[0];
+      if (!s.watched_count) {
         emBreve.push({
           id: s.uuid,
           title: title,
-          season: firstEp.season,
-          episode: firstEp.number,
-          episodeName: firstEp.name,
+          tvdbId: s.tvdb_id,
+          season: s.first_season,
+          episode: s.first_number,
+          episodeName: s.first_name || ("Episódio " + s.first_number),
           addedAt: s.created_at,
           hue1: seed[0],
           hue2: seed[1]
@@ -192,68 +214,115 @@
         return;
       }
 
-      if (!unwatchedEps.length) return; // fully watched, nothing pending
+      if (s.next_season == null) return; // fully watched, nothing pending
 
-      var nextEp = unwatchedEps[0];
-      var isPremiere = nextEp.season === flat[0].season && nextEp.number === 1;
-      var last = flat[flat.length - 1];
-      var isLatest = nextEp.season === last.season && nextEp.number === last.number;
-
+      var isPremiere = s.next_season === s.first_season && s.next_number === s.first_number;
+      var isLatest = s.next_season === s.last_season && s.next_number === s.last_number;
       var tags = [];
       if (isPremiere) tags.push("PREMIERE");
       else if (isLatest) tags.push("MAIS RECENTE");
 
-      var stale = daysSince(lastWatchedAt) > 120;
-
       minhaLista.push({
         id: s.uuid,
         title: title,
-        season: nextEp.season,
-        episode: nextEp.number,
-        episodeName: nextEp.name,
+        tvdbId: s.tvdb_id,
+        season: s.next_season,
+        episode: s.next_number,
+        episodeName: s.next_name || ("Episódio " + s.next_number),
         tags: tags,
-        stale: stale,
-        lastActivity: lastWatchedAt || s.created_at,
+        stale: daysSince(s.last_watched_at) > 120,
+        lastActivity: s.last_watched_at || s.created_at,
         hue1: seed[0],
         hue2: seed[1]
       });
     });
 
-    minhaLista.sort(function (a, b) {
-      return (b.lastActivity || "").localeCompare(a.lastActivity || "");
-    });
-    emBreve.sort(function (a, b) {
-      return (b.addedAt || "").localeCompare(a.addedAt || "");
-    });
-
-    return { minhaLista: minhaLista, emBreve: emBreve, assistidos: buildAssistidos(seriesArr) };
+    minhaLista.sort(function (a, b) { return (b.lastActivity || "").localeCompare(a.lastActivity || ""); });
+    emBreve.sort(function (a, b) { return (b.addedAt || "").localeCompare(a.addedAt || ""); });
+    return { minhaLista: minhaLista, emBreve: emBreve };
   }
 
-  function buildAssistidos(seriesArr) {
-    var assistidos = [];
-    seriesArr.forEach(function (s) {
-      var title = s.title || "Sem título";
-      var seed = colorSeed(title);
-      (s.seasons || []).forEach(function (season) {
-        (season.episodes || []).forEach(function (ep) {
-          if (!ep.is_watched) return;
-          assistidos.push({
-            id: s.uuid,
-            title: title,
-            season: season.number,
-            episode: ep.number,
-            episodeName: ep.name || ("Episódio " + ep.number),
-            watchedAt: ep.watched_at,
-            hue1: seed[0],
-            hue2: seed[1]
-          });
+  // Per-series recomputation, used only for series touched by local overrides
+  // (the series_progress view reflects the database, not localStorage corrections).
+  function computeSeriesEntry(s) {
+    var title = s.title || "Sem título";
+    var seasons = (s.seasons || [])
+      .filter(function (se) { return !se.is_specials; })
+      .slice()
+      .sort(function (a, b) { return (a.number || 0) - (b.number || 0); });
+
+    var flat = [];
+    seasons.forEach(function (season) {
+      var eps = (season.episodes || []).slice().sort(function (a, b) { return (a.number || 0) - (b.number || 0); });
+      eps.forEach(function (ep) {
+        flat.push({
+          season: season.number,
+          number: ep.number,
+          name: ep.name || ("Episódio " + ep.number),
+          is_watched: !!ep.is_watched,
+          watched_at: ep.watched_at
         });
       });
     });
-    assistidos.sort(function (a, b) {
-      return (b.watchedAt || "").localeCompare(a.watchedAt || "");
+    if (!flat.length) return null;
+
+    var watchedEps = flat.filter(function (e) { return e.is_watched; });
+    var unwatchedEps = flat.filter(function (e) { return !e.is_watched; });
+    var lastWatchedAt = null;
+    watchedEps.forEach(function (e) {
+      if (e.watched_at && (!lastWatchedAt || e.watched_at > lastWatchedAt)) lastWatchedAt = e.watched_at;
     });
-    return assistidos;
+    var seed = colorSeed(title);
+
+    if (!watchedEps.length) {
+      var firstEp = flat[0];
+      return {
+        type: "em-breve",
+        item: {
+          id: s.uuid, title: title, tvdbId: s.tvdb_id, season: firstEp.season, episode: firstEp.number,
+          episodeName: firstEp.name, addedAt: s.created_at, hue1: seed[0], hue2: seed[1]
+        }
+      };
+    }
+    if (!unwatchedEps.length) return null;
+
+    var nextEp = unwatchedEps[0];
+    var isPremiere = nextEp.season === flat[0].season && nextEp.number === 1;
+    var last = flat[flat.length - 1];
+    var isLatest = nextEp.season === last.season && nextEp.number === last.number;
+    var tags = [];
+    if (isPremiere) tags.push("PREMIERE");
+    else if (isLatest) tags.push("MAIS RECENTE");
+
+    return {
+      type: "minha-lista",
+      item: {
+        id: s.uuid, title: title, tvdbId: s.tvdb_id, season: nextEp.season, episode: nextEp.number,
+        episodeName: nextEp.name, tags: tags, stale: daysSince(lastWatchedAt) > 120,
+        lastActivity: lastWatchedAt || s.created_at, hue1: seed[0], hue2: seed[1]
+      }
+    };
+  }
+
+  function applyOverriddenSeriesToLists(lists) {
+    var uuids = getOverriddenSeriesUuids();
+    if (!uuids.length) return Promise.resolve(lists);
+    return Promise.all(uuids.map(fetchSeriesDetail)).then(function (details) {
+      details.forEach(function (detail) {
+        if (!detail) return;
+        applyOverridesToSeries([detail]);
+        lists.minhaLista = lists.minhaLista.filter(function (i) { return i.id !== detail.uuid; });
+        lists.emBreve = lists.emBreve.filter(function (i) { return i.id !== detail.uuid; });
+        var entry = computeSeriesEntry(detail);
+        if (entry) {
+          if (entry.type === "minha-lista") lists.minhaLista.push(entry.item);
+          else lists.emBreve.push(entry.item);
+        }
+      });
+      lists.minhaLista.sort(function (a, b) { return (b.lastActivity || "").localeCompare(a.lastActivity || ""); });
+      lists.emBreve.sort(function (a, b) { return (b.addedAt || "").localeCompare(a.addedAt || ""); });
+      return lists;
+    });
   }
 
   // ---------- Rendering: cards ----------
@@ -312,6 +381,8 @@
         '<div class="card-action">' + actionHtml + '</div>' +
       '</div>';
 
+    applyPosterArtwork(wrap.querySelector(".card-poster"), item.tvdbId);
+
     return wrap;
   }
 
@@ -345,7 +416,10 @@
 
     var oldIndicator = container.querySelector(".loading-indicator");
     if (oldIndicator) oldIndicator.remove();
-    if (state.renderedCount < list.length) {
+
+    var hasMoreLocally = state.renderedCount < list.length;
+    var hasMoreRemote = state.activeTab === "assistidos" && state.assistidosHasMore;
+    if (hasMoreLocally || hasMoreRemote) {
       var ind = document.createElement("div");
       ind.className = "loading-indicator";
       ind.textContent = "Carregando";
@@ -356,24 +430,40 @@
   function handleScroll() {
     var container = document.getElementById("list-container");
     if (state.loadingMore) return;
-    var list = getActiveList();
-    if (state.renderedCount >= list.length) return;
 
-    if (container.scrollTop + container.clientHeight >= container.scrollHeight - 80) {
+    if (container.scrollTop + container.clientHeight < container.scrollHeight - 80) return;
+
+    var list = getActiveList();
+    if (state.renderedCount < list.length) {
       state.loadingMore = true;
       setTimeout(function () {
         renderList(false);
         state.loadingMore = false;
-      }, 500);
+      }, 300);
+      return;
+    }
+
+    if (state.activeTab === "assistidos" && state.assistidosHasMore && !state.assistidosLoading) {
+      loadAssistidosPage(false).then(function () {
+        renderList(false);
+      });
     }
   }
 
-  function rebuildLists() {
-    applyOverridesToSeries(state.seriesRaw);
-    var rebuilt = buildEntries(state.seriesRaw);
-    state.minhaLista = rebuilt.minhaLista;
-    state.emBreve = rebuilt.emBreve;
-    state.assistidos = rebuilt.assistidos;
+  // ---------- Interactive mark / undo ----------
+  function refreshSeriesInLists(uuid) {
+    return fetchSeriesDetail(uuid).then(function (detail) {
+      applyOverridesToSeries([detail]);
+      state.minhaLista = state.minhaLista.filter(function (i) { return i.id !== uuid; });
+      state.emBreve = state.emBreve.filter(function (i) { return i.id !== uuid; });
+      var entry = computeSeriesEntry(detail);
+      if (entry) {
+        if (entry.type === "minha-lista") state.minhaLista.push(entry.item);
+        else state.emBreve.push(entry.item);
+      }
+      state.minhaLista.sort(function (a, b) { return (b.lastActivity || "").localeCompare(a.lastActivity || ""); });
+      state.emBreve.sort(function (a, b) { return (b.addedAt || "").localeCompare(a.addedAt || ""); });
+    });
   }
 
   function handleCardClick(e) {
@@ -385,36 +475,51 @@
     var id = card.getAttribute("data-id");
     var season = parseInt(card.getAttribute("data-season"), 10);
     var episode = parseInt(card.getAttribute("data-episode"), 10);
+    var list = getActiveList();
+    var item = list.filter(function (i) { return i.id === id && i.season === season && i.episode === episode; })[0];
 
     if (checkBtn) {
       checkBtn.classList.add("confirming");
       setTimeout(function () { checkBtn.classList.remove("confirming"); }, 500);
 
-      markEpisodeWatched(id, season, episode);
-      rebuildLists();
-      renderList(true);
+      var title = item ? item.title : "";
+      var episodeName = item ? item.episodeName : "";
+      var tvdbId = item ? item.tvdbId : null;
+
+      markEpisodeWatched(id, season, episode, title, episodeName, tvdbId);
+      state.assistidos.unshift({
+        id: id, title: title, tvdbId: tvdbId, season: season, episode: episode, episodeName: episodeName,
+        watchedAt: new Date().toISOString(), hue1: item ? item.hue1 : 0, hue2: item ? item.hue2 : 40
+      });
+
+      refreshSeriesInLists(id).then(function () { renderList(true); });
 
       showToast("Episódio marcado como assistido", {
         label: "Desfazer",
         onClick: function () {
           unmarkEpisodeWatched(id, season, episode);
-          rebuildLists();
-          renderList(true);
+          state.assistidos = state.assistidos.filter(function (i) {
+            return !(i.id === id && i.season === season && i.episode === episode);
+          });
+          refreshSeriesInLists(id).then(function () { renderList(true); });
         }
       });
       return;
     }
 
     unmarkEpisodeWatched(id, season, episode);
-    rebuildLists();
+    state.assistidos = state.assistidos.filter(function (i) {
+      return !(i.id === id && i.season === season && i.episode === episode);
+    });
     renderList(true);
+    refreshSeriesInLists(id);
 
     showToast("Marcação corrigida: episódio não assistido", {
       label: "Desfazer",
       onClick: function () {
-        markEpisodeWatched(id, season, episode);
-        rebuildLists();
-        renderList(true);
+        markEpisodeWatched(id, season, episode, item ? item.title : "", item ? item.episodeName : "", item ? item.tvdbId : null);
+        state.assistidos.unshift(item || { id: id, title: "", season: season, episode: episode, episodeName: "", watchedAt: new Date().toISOString(), hue1: 0, hue2: 40 });
+        refreshSeriesInLists(id).then(function () { renderList(true); });
       }
     });
   }
@@ -480,21 +585,14 @@
       return;
     }
 
-    var seriesMatches = state.seriesRaw
+    var seriesMatches = state.seriesSearchStats
       .filter(function (s) { return (s.title || "").toLowerCase().indexOf(query) !== -1; })
       .slice(0, 25)
       .map(function (s) {
         var seed = colorSeed(s.title || "?");
-        var totalEps = 0, watchedEps = 0;
-        (s.seasons || []).forEach(function (se) {
-          (se.episodes || []).forEach(function (ep) {
-            totalEps++;
-            if (ep.is_watched) watchedEps++;
-          });
-        });
         return {
           type: "Série", title: s.title || "Sem título",
-          sub: watchedEps + "/" + totalEps + " episódios assistidos",
+          sub: s.watched_episodes + "/" + s.total_episodes + " episódios assistidos",
           hue1: seed[0], hue2: seed[1]
         };
       });
@@ -538,70 +636,27 @@
   }
 
   // ---------- Profile / stats screen ----------
-  function computeStats() {
-    var series = state.seriesRaw, movies = state.moviesRaw;
-    var episodesWatched = 0;
-    series.forEach(function (s) {
-      (s.seasons || []).forEach(function (se) {
-        (se.episodes || []).forEach(function (ep) {
-          if (ep.is_watched) episodesWatched++;
-        });
-      });
-    });
-    return {
-      totalSeries: series.length,
-      totalMovies: movies.length,
-      moviesWatched: movies.filter(function (m) { return m.is_watched; }).length,
-      episodesWatched: episodesWatched,
-      seriesUpToDate: series.filter(function (s) { return s.status === "up_to_date"; }).length,
-      seriesContinuing: series.filter(function (s) { return s.status === "continuing"; }).length,
-      seriesStopped: series.filter(function (s) { return s.status === "stopped"; }).length,
-      seriesNotStarted: series.filter(function (s) { return s.status === "not_started_yet"; }).length
-    };
-  }
-
   function renderProfile() {
-    var stats = computeStats();
+    var stats = state.profileStats || {
+      total_series: 0, total_movies: 0, movies_watched: 0, episodes_watched: 0,
+      series_up_to_date: 0, series_continuing: 0, series_stopped: 0, series_not_started: 0
+    };
     var container = document.getElementById("profile-container");
     container.innerHTML =
       '<div class="stats-grid">' +
-        statCard(stats.totalSeries, "Séries") +
-        statCard(stats.totalMovies, "Filmes") +
-        statCard(stats.episodesWatched, "Episódios vistos") +
-        statCard(stats.moviesWatched, "Filmes assistidos") +
-        statCard(stats.seriesUpToDate, "Em dia") +
-        statCard(stats.seriesContinuing, "Em andamento") +
-        statCard(stats.seriesStopped, "Paradas") +
-        statCard(stats.seriesNotStarted, "Não iniciadas") +
-      '</div>' +
-      '<div class="export-section">' +
-        '<button id="export-btn" class="export-btn">Exportar dados atualizados (.json)</button>' +
-        '<div class="export-hint">Baixa os arquivos JSON com suas marcações mais recentes.</div>' +
+        statCard(stats.total_series, "Séries") +
+        statCard(stats.total_movies, "Filmes") +
+        statCard(stats.episodes_watched, "Episódios vistos") +
+        statCard(stats.movies_watched, "Filmes assistidos") +
+        statCard(stats.series_up_to_date, "Em dia") +
+        statCard(stats.series_continuing, "Em andamento") +
+        statCard(stats.series_stopped, "Paradas") +
+        statCard(stats.series_not_started, "Não iniciadas") +
       '</div>';
-
-    document.getElementById("export-btn").addEventListener("click", exportData);
   }
 
   function statCard(value, label) {
     return '<div class="stat-card"><div class="stat-value">' + value + '</div><div class="stat-label">' + escapeHtml(label) + '</div></div>';
-  }
-
-  function downloadJson(obj, filename) {
-    var blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
-    var url = URL.createObjectURL(blob);
-    var a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  }
-
-  function exportData() {
-    downloadJson(state.seriesRaw, "tvtime-series-updated.json");
-    downloadJson(state.moviesRaw, "tvtime-movies-updated.json");
-    showToast("Arquivos atualizados baixados");
   }
 
   // ---------- Supabase data fetching ----------
@@ -627,6 +682,19 @@
       });
     }
     return fetchPage(0);
+  }
+
+  function fetchOne(table, query) {
+    var url = SUPABASE_CONFIG.url + "/rest/v1/" + table + "?" + query;
+    return fetch(url, {
+      headers: {
+        apikey: SUPABASE_CONFIG.anonKey,
+        Authorization: "Bearer " + SUPABASE_CONFIG.anonKey
+      }
+    }).then(function (r) {
+      if (!r.ok) throw new Error("Falha ao carregar " + table);
+      return r.json();
+    });
   }
 
   function assembleSeries(seriesRows, seasonRows, episodeRows) {
@@ -661,25 +729,189 @@
         title: s.title,
         status: s.status,
         is_favorite: s.is_favorite,
-        _noEpisodeData: s.no_episode_data,
         created_at: s.created_at,
+        tvdb_id: s.tvdb_id,
         seasons: seasons
       };
+    });
+  }
+
+  // ---------- TheTVDB artwork ----------
+  // Login exchanges the long-lived API key for a bearer token valid ~1 month;
+  // we cache it in localStorage and only re-login when it's missing/near expiry.
+  var tvdbLoginPromise = null;
+  function getTvdbToken() {
+    if (!TVDB_CONFIG || !TVDB_CONFIG.apiKey) return Promise.resolve(null);
+
+    try {
+      var cached = JSON.parse(localStorage.getItem(TVDB_TOKEN_KEY) || "null");
+      if (cached && cached.token && cached.expiresAt > Date.now()) {
+        return Promise.resolve(cached.token);
+      }
+    } catch (e) { /* ignore corrupt cache */ }
+
+    if (tvdbLoginPromise) return tvdbLoginPromise;
+
+    tvdbLoginPromise = fetch(TVDB_API_BASE + "/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apikey: TVDB_CONFIG.apiKey })
+    }).then(function (r) {
+      if (!r.ok) throw new Error("Falha no login da TheTVDB");
+      return r.json();
+    }).then(function (json) {
+      var token = json.data && json.data.token;
+      if (!token) throw new Error("Login da TheTVDB não retornou token");
+      localStorage.setItem(TVDB_TOKEN_KEY, JSON.stringify({
+        token: token,
+        expiresAt: Date.now() + 25 * 24 * 60 * 60 * 1000 // token lives ~1 month, refresh a bit early
+      }));
+      tvdbLoginPromise = null;
+      return token;
+    }).catch(function (err) {
+      tvdbLoginPromise = null;
+      throw err;
+    });
+    return tvdbLoginPromise;
+  }
+
+  var tvdbImageCache = {};
+  function fetchSeriesArtwork(tvdbId) {
+    if (!tvdbId || !TVDB_CONFIG || !TVDB_CONFIG.apiKey) return Promise.resolve(null);
+    if (tvdbImageCache[tvdbId]) return tvdbImageCache[tvdbId];
+
+    tvdbImageCache[tvdbId] = getTvdbToken().then(function (token) {
+      if (!token) return null;
+      return fetch(TVDB_API_BASE + "/series/" + tvdbId + "/extended", {
+        headers: { Authorization: "Bearer " + token }
+      }).then(function (r) {
+        if (!r.ok) throw new Error("Falha ao buscar série " + tvdbId + " na TheTVDB");
+        return r.json();
+      }).then(function (json) {
+        return (json.data && json.data.image) || null;
+      });
+    }).catch(function (err) {
+      console.error(err);
+      return null;
+    });
+    return tvdbImageCache[tvdbId];
+  }
+
+  // Progressively upgrades a card's gradient/initials poster to the real
+  // cover once it loads, without blocking the initial render.
+  function applyPosterArtwork(posterEl, tvdbId) {
+    if (!tvdbId) return;
+    fetchSeriesArtwork(tvdbId).then(function (url) {
+      if (!url || !document.body.contains(posterEl)) return;
+      var preload = new Image();
+      preload.onload = function () {
+        if (!document.body.contains(posterEl)) return;
+        // The gradient placeholder was set via the "background" shorthand,
+        // which implicitly resets background-size/position to "auto" inline
+        // (beating the stylesheet's "cover"). Set them explicitly here too.
+        posterEl.style.backgroundImage = "url('" + url.replace(/'/g, "\\'") + "')";
+        posterEl.style.backgroundSize = "cover";
+        posterEl.style.backgroundPosition = "center";
+        posterEl.style.backgroundRepeat = "no-repeat";
+        posterEl.classList.add("has-image");
+      };
+      preload.src = url;
+    });
+  }
+
+  // Full episode-level detail for a single series, fetched on demand only
+  // when the user interacts with that series (mark/undo). Cached per session
+  // so repeated corrections on the same series don't re-fetch.
+  function fetchSeriesDetail(uuid) {
+    if (state.seriesDetailCache[uuid]) return Promise.resolve(state.seriesDetailCache[uuid]);
+    var meta = state.seriesProgress.filter(function (s) { return s.uuid === uuid; })[0];
+    return Promise.all([
+      fetchAllRows("seasons", "select=*&series_uuid=eq." + uuid + "&order=number"),
+      fetchAllRows("episodes", "select=*&series_uuid=eq." + uuid + "&order=season_number,number")
+    ]).then(function (results) {
+      var assembled = assembleSeries(
+        [{ uuid: uuid, title: meta ? meta.title : "?", status: meta ? meta.status : null, is_favorite: meta ? meta.is_favorite : false, created_at: meta ? meta.created_at : null, tvdb_id: meta ? meta.tvdb_id : null }],
+        results[0],
+        results[1]
+      )[0];
+      state.seriesDetailCache[uuid] = assembled;
+      return assembled;
+    });
+  }
+
+  function loadAssistidosPage(reset) {
+    if (reset) {
+      state.assistidosOffset = 0;
+      state.assistidosHasMore = true;
+      state.assistidos = getLocallyWatchedExtras();
+    }
+    if (!state.assistidosHasMore) return Promise.resolve();
+
+    state.assistidosLoading = true;
+    var from = state.assistidosOffset;
+    var to = from + PAGE_SIZE * 3 - 1; // overfetch a bit to absorb locally-unmarked corrections
+    return fetch(
+      SUPABASE_CONFIG.url + "/rest/v1/episodes_watched_feed?select=*",
+      {
+        headers: {
+          apikey: SUPABASE_CONFIG.anonKey,
+          Authorization: "Bearer " + SUPABASE_CONFIG.anonKey,
+          Range: from + "-" + to
+        }
+      }
+    ).then(function (r) {
+      if (!r.ok) throw new Error("Falha ao carregar episódios assistidos");
+      return r.json();
+    }).then(function (rows) {
+      state.assistidosHasMore = rows.length === (to - from + 1);
+      state.assistidosOffset = from + rows.length;
+
+      var existingKeys = {};
+      state.assistidos.forEach(function (i) { existingKeys[episodeKey(i.id, i.season, i.episode)] = true; });
+
+      rows.forEach(function (row) {
+        var key = episodeKey(row.series_uuid, row.season_number, row.number);
+        if (existingKeys[key]) return;
+        var ov = overrides.episodes[key];
+        if (ov && typeof ov === "object" && ov.watched === false) return; // locally corrected to unwatched
+
+        var seed = colorSeed(row.series_title || "?");
+        state.assistidos.push({
+          id: row.series_uuid,
+          title: row.series_title || "Sem título",
+          tvdbId: row.tvdb_id,
+          season: row.season_number,
+          episode: row.number,
+          episodeName: row.name || ("Episódio " + row.number),
+          watchedAt: row.watched_at,
+          hue1: seed[0],
+          hue2: seed[1]
+        });
+        existingKeys[key] = true;
+      });
+
+      state.assistidos.sort(function (a, b) { return (b.watchedAt || "").localeCompare(a.watchedAt || ""); });
+      state.assistidosLoading = false;
+    }).catch(function (err) {
+      state.assistidosLoading = false;
+      throw err;
     });
   }
 
   function loadFromSupabase() {
     return Promise.all([
       fetchAllRows("movies", "select=*&order=uuid"),
-      fetchAllRows("series", "select=*&order=uuid"),
-      fetchAllRows("seasons", "select=*&order=series_uuid,number"),
-      fetchAllRows("episodes", "select=*&order=id"),
-      fetchAllRows("lists", "select=*,items:list_items(type,tvdb_id,name,custom_order)&order=id")
+      fetchAllRows("series_progress", "select=*&order=uuid"),
+      fetchAllRows("series_search_stats", "select=*&order=uuid"),
+      fetchAllRows("lists", "select=*,items:list_items(type,tvdb_id,name,custom_order)&order=id"),
+      fetchOne("profile_stats", "select=*")
     ]).then(function (results) {
       return {
         movies: results[0],
-        series: assembleSeries(results[1], results[2], results[3]),
-        lists: results[4]
+        seriesProgress: results[1],
+        seriesSearchStats: results[2],
+        lists: results[3],
+        profileStats: results[4][0] || null
       };
     });
   }
@@ -702,18 +934,24 @@
       '<div class="empty-state">Carregando dados…</div>';
 
     loadFromSupabase().then(function (data) {
-      state.seriesRaw = data.series;
       state.moviesRaw = data.movies;
+      state.seriesProgress = data.seriesProgress;
+      state.seriesSearchStats = data.seriesSearchStats;
       state.listsRaw = data.lists;
+      state.profileStats = data.profileStats;
 
-      applyOverridesToSeries(state.seriesRaw);
       applyOverridesToMovies(state.moviesRaw);
 
-      var built = buildEntries(state.seriesRaw);
+      var built = buildHomeListsFromProgress(state.seriesProgress);
       state.minhaLista = built.minhaLista;
       state.emBreve = built.emBreve;
-      state.assistidos = built.assistidos;
 
+      return applyOverriddenSeriesToLists(built).then(function (finalLists) {
+        state.minhaLista = finalLists.minhaLista;
+        state.emBreve = finalLists.emBreve;
+        return loadAssistidosPage(true);
+      });
+    }).then(function () {
       renderList(true);
       renderLists();
       renderProfile();

@@ -33,6 +33,7 @@ if (fs.existsSync(ENV_PATH)) {
 
 var url = envFromFile.SUPABASE_URL || process.env.SUPABASE_URL;
 var anonKey = envFromFile.SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY;
+var tvdbApiKey = envFromFile.TVDB_API_KEY || process.env.TVDB_API_KEY || "";
 
 if (!url || !anonKey) {
   console.error(
@@ -42,11 +43,18 @@ if (!url || !anonKey) {
   process.exit(1);
 }
 
+if (!tvdbApiKey) {
+  console.log("Aviso: TVDB_API_KEY não definido — capas de séries/filmes via TheTVDB ficarão desativadas.");
+}
+
 var output =
   "// Gerado automaticamente por scripts/generate-config.js — não editar à mão, não commitar.\n" +
   "window.SUPABASE_CONFIG = {\n" +
   "  url: " + JSON.stringify(url) + ",\n" +
   "  anonKey: " + JSON.stringify(anonKey) + "\n" +
+  "};\n" +
+  "window.TVDB_CONFIG = {\n" +
+  "  apiKey: " + JSON.stringify(tvdbApiKey) + "\n" +
   "};\n";
 
 fs.writeFileSync(OUT_PATH, output);
