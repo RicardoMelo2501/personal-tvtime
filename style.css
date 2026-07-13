@@ -589,6 +589,21 @@ html, body {
 .progress-status-stopped { background: #9a4b00; }
 .progress-status-up_to_date { background: var(--black); }
 .progress-status-not_started_yet { background: #6b6b70; }
+.progress-status-movie_watched { background: #2e7d32; }
+.progress-status-movie_unwatched { background: #6b6b70; }
+
+.progress-fav-star { color: #f5b301; font-size: 13px; }
+
+.movies-progress-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+}
 
 .progress-count { color: var(--text-dim); }
 
@@ -971,7 +986,7 @@ html, body {
   html, body { background: #000; }
   .phone { background: #0f0f11; }
   .app-header { background: #0f0f11; }
-  .card, .list-card, .stat-card, .search-row, .search-bar input, .bottom-nav, .progress-card { background: #1a1a1d; border-color: #2a2a2e; color: #f0f0f0; }
+  .card, .list-card, .stat-card, .search-row, .search-bar input, .bottom-nav, .progress-card, .movies-progress-summary { background: #1a1a1d; border-color: #2a2a2e; color: #f0f0f0; }
   body, .phone { color: #f0f0f0; }
   .tab.active, .progress-tab.active { color: #fff; border-bottom-color: #fff; }
   .progress-bar-track { background: #2a2a2e; }

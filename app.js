@@ -614,6 +614,7 @@
       (item.badge ? '<span class="search-add-badge">' + escapeHtml(item.badge) + '</span>' : '<span class="search-type-badge">' + escapeHtml(item.type) + '</span>');
     if (item.imageUrl) setElementImage(row.querySelector(".search-avatar"), item.imageUrl);
     else if (item.tvdbId && item.kind === "series") applyPosterArtwork(row.querySelector(".search-avatar"), item.tvdbId);
+    else if (item.tvdbId && item.kind === "movie") applyMoviePosterArtwork(row.querySelector(".search-avatar"), item.tvdbId);
     return row;
   }
 
@@ -650,7 +651,7 @@
         return {
           kind: "movie", id: m.uuid, tvdbId: m.tvdb_id,
           type: "Filme", title: m.title || "Sem título",
-          sub: (m.year || "—") + (m.is_watched ? " · Assistido" : " · Não assistido"),
+          sub: (m.year || "—") + " · " + movieWatchedLabel(m) + (m.is_favorite ? " · ★ Favorito" : ""),
           hue1: seed[0], hue2: seed[1]
         };
       });
@@ -813,10 +814,79 @@
     return wrap;
   }
 
+  // Movies don't have episode progress — the "Filmes" tab reuses the data
+  // already loaded in state.moviesRaw (is_watched, watched_at, is_favorite,
+  // year) to show a collection-level summary plus one card per movie.
+  function movieWatchedLabel(m) {
+    if (!m.is_watched) return "Não assistido";
+    return m.watched_at ? formatWatchedAt(m.watched_at) : "Assistido";
+  }
+
+  function movieProgressCard(m) {
+    var title = m.title || "Sem título";
+    var seed = colorSeed(title);
+    var wrap = document.createElement("div");
+    wrap.className = "progress-card";
+    wrap.setAttribute("data-movie-id", m.uuid);
+    var metaLine = (m.year ? m.year + " · " : "") + movieWatchedLabel(m);
+    wrap.innerHTML =
+      '<div class="progress-card-poster" style="' + posterStyle(seed[0], seed[1]) + '">' + escapeHtml(initials(title)) + '</div>' +
+      '<div class="progress-card-info">' +
+        '<div class="progress-card-title">' + escapeHtml(title) +
+          (m.is_favorite ? ' <span class="progress-fav-star" title="Favorito">★</span>' : '') + '</div>' +
+        '<div class="progress-card-meta">' +
+          '<span class="progress-status-badge progress-status-' + (m.is_watched ? 'movie_watched' : 'movie_unwatched') + '">' +
+            (m.is_watched ? 'Assistido' : 'Pendente') + '</span>' +
+          '<span class="progress-count">' + escapeHtml(metaLine) + '</span>' +
+        '</div>' +
+      '</div>';
+    return wrap;
+  }
+
+  function renderMoviesProgress(container) {
+    var movies = state.moviesRaw.slice();
+    if (!movies.length) {
+      container.innerHTML = '<div class="empty-state">Nenhum filme na sua lista.</div>';
+      return;
+    }
+
+    var watched = movies.filter(function (m) { return m.is_watched; }).length;
+    var favorites = movies.filter(function (m) { return m.is_favorite; }).length;
+    var pct = Math.round((watched / movies.length) * 100);
+
+    var summary = document.createElement("div");
+    summary.className = "movies-progress-summary";
+    summary.innerHTML =
+      '<div class="progress-card-meta">' +
+        '<span class="progress-count">' + watched + '/' + movies.length + ' filmes assistidos (' + pct + '%)' +
+          (favorites ? ' · ★ ' + favorites + ' favoritos' : '') + '</span>' +
+      '</div>' +
+      '<div class="progress-bar-track"><div class="progress-bar-fill" style="width:' + pct + '%"></div></div>';
+    container.appendChild(summary);
+
+    // Pending movies first (that's the actionable part of "progress"),
+    // then watched ones by most recent watch date.
+    movies.sort(function (a, b) {
+      if (!a.is_watched !== !b.is_watched) return a.is_watched ? 1 : -1;
+      if (a.is_watched) {
+        var cmp = (b.watched_at || "").localeCompare(a.watched_at || "");
+        if (cmp !== 0) return cmp;
+      }
+      return (a.title || "").localeCompare(b.title || "");
+    });
+    movies.forEach(function (m) { container.appendChild(movieProgressCard(m)); });
+  }
+
   function renderProgressList() {
     var container = document.getElementById("progress-container");
-    var list = buildProgressList(state.activeProgressStatus);
     container.innerHTML = "";
+
+    if (state.activeProgressStatus === "movies") {
+      renderMoviesProgress(container);
+      return;
+    }
+
+    var list = buildProgressList(state.activeProgressStatus);
     if (!list.length) {
       container.innerHTML = '<div class="empty-state">Nenhuma série encontrada.</div>';
       return;
@@ -836,7 +906,10 @@
 
     document.getElementById("progress-container").addEventListener("click", function (e) {
       var card = e.target.closest(".progress-card");
-      if (card) openSeriesDetail(card.getAttribute("data-id"));
+      if (!card) return;
+      var movieId = card.getAttribute("data-movie-id");
+      if (movieId) openMovieDetail(movieId);
+      else openSeriesDetail(card.getAttribute("data-id"));
     });
   }
 
@@ -1010,6 +1083,15 @@
   function applyPosterArtwork(posterEl, tvdbId) {
     if (!tvdbId) return;
     fetchSeriesArtwork(tvdbId).then(function (url) { setElementImage(posterEl, url); });
+  }
+
+  // Movie covers come from the movies/{id}/extended endpoint, which the
+  // detail screen already fetches and caches — search rows just reuse it.
+  function applyMoviePosterArtwork(posterEl, tvdbId) {
+    if (!tvdbId) return;
+    fetchMovieExtendedInfo(tvdbId).then(function (info) {
+      if (info && info.image) setElementImage(posterEl, info.image);
+    });
   }
 
   // Single-request upcoming-episode lookup for the "Em breve" calendar:
@@ -1494,12 +1576,14 @@
       movie.watched_at = nowWatched ? new Date().toISOString() : null;
       btn.classList.toggle("watched", nowWatched);
       btn.textContent = nowWatched ? "Assistido ✓" : "Marcar como assistido";
+      renderProgressList();
 
       patchMovieWatched(movie.uuid, nowWatched).catch(function (err) {
         movie.is_watched = !nowWatched;
         movie.watched_at = nowWatched ? null : movie.watched_at;
         btn.classList.toggle("watched", !nowWatched);
         btn.textContent = !nowWatched ? "Assistido ✓" : "Marcar como assistido";
+        renderProgressList();
         showToast("Erro ao atualizar filme");
         console.error(err);
       });
@@ -1557,6 +1641,7 @@
 
       closeDetailScreen();
       renderList(true);
+      renderProgressList();
       renderSearchResults(document.getElementById("search-input").value);
       showToast('"' + title + '" removido da sua lista');
     }).catch(function (err) {
