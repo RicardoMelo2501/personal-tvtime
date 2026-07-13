@@ -840,6 +840,7 @@
           '<span class="progress-count">' + escapeHtml(metaLine) + '</span>' +
         '</div>' +
       '</div>';
+    applyMoviePosterArtwork(wrap.querySelector(".progress-card-poster"), m.tvdb_id);
     return wrap;
   }
 
@@ -1085,13 +1086,34 @@
     fetchSeriesArtwork(tvdbId).then(function (url) { setElementImage(posterEl, url); });
   }
 
-  // Movie covers come from the movies/{id}/extended endpoint, which the
-  // detail screen already fetches and caches — search rows just reuse it.
+  // Movie covers mirror fetchSeriesArtwork: a single movies/{id} request
+  // per movie (the extended+translations bundle the detail screen uses
+  // would be 3 requests each — too heavy for the full progress list).
+  var tvdbMovieImageCache = {};
+  function fetchMovieArtwork(tvdbId) {
+    if (!tvdbId || !TVDB_CONFIG || !TVDB_CONFIG.apiKey) return Promise.resolve(null);
+    if (tvdbMovieImageCache[tvdbId]) return tvdbMovieImageCache[tvdbId];
+
+    tvdbMovieImageCache[tvdbId] = getTvdbToken().then(function (token) {
+      if (!token) return null;
+      return fetch(TVDB_API_BASE + "/movies/" + tvdbId, {
+        headers: { Authorization: "Bearer " + token }
+      }).then(function (r) {
+        if (!r.ok) throw new Error("Falha ao buscar filme " + tvdbId + " na TheTVDB");
+        return r.json();
+      }).then(function (json) {
+        return (json.data && json.data.image) || null;
+      });
+    }).catch(function (err) {
+      console.error(err);
+      return null;
+    });
+    return tvdbMovieImageCache[tvdbId];
+  }
+
   function applyMoviePosterArtwork(posterEl, tvdbId) {
     if (!tvdbId) return;
-    fetchMovieExtendedInfo(tvdbId).then(function (info) {
-      if (info && info.image) setElementImage(posterEl, info.image);
-    });
+    fetchMovieArtwork(tvdbId).then(function (url) { setElementImage(posterEl, url); });
   }
 
   // Single-request upcoming-episode lookup for the "Em breve" calendar:
