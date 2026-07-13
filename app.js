@@ -30,6 +30,8 @@
     assistidosLoading: false,
     activeTab: "minha-lista",
     activeProgressStatus: "all",
+    progressMoviesSorted: [],
+    progressMoviesRendered: 0,
     gridView: false,
     renderedCount: 0,
     loadingMore: false
@@ -844,6 +846,18 @@
     return wrap;
   }
 
+  // Rendered in scroll-fed chunks: with 738 movies, appending every card at
+  // once fires a poster request for each one and freezes the tab. Only the
+  // cards actually scrolled into reach get created (and fetch their cover).
+  var PROGRESS_MOVIES_PAGE = 20;
+
+  function appendMoviesProgressChunk(container) {
+    var list = state.progressMoviesSorted;
+    var next = list.slice(state.progressMoviesRendered, state.progressMoviesRendered + PROGRESS_MOVIES_PAGE);
+    next.forEach(function (m) { container.appendChild(movieProgressCard(m)); });
+    state.progressMoviesRendered += next.length;
+  }
+
   function renderMoviesProgress(container) {
     var movies = state.moviesRaw.slice();
     if (!movies.length) {
@@ -875,7 +889,10 @@
       }
       return (a.title || "").localeCompare(b.title || "");
     });
-    movies.forEach(function (m) { container.appendChild(movieProgressCard(m)); });
+
+    state.progressMoviesSorted = movies;
+    state.progressMoviesRendered = 0;
+    appendMoviesProgressChunk(container);
   }
 
   function renderProgressList() {
@@ -911,6 +928,13 @@
       var movieId = card.getAttribute("data-movie-id");
       if (movieId) openMovieDetail(movieId);
       else openSeriesDetail(card.getAttribute("data-id"));
+    });
+
+    document.getElementById("progress-container").addEventListener("scroll", function () {
+      if (state.activeProgressStatus !== "movies") return;
+      if (this.scrollTop + this.clientHeight < this.scrollHeight - 160) return;
+      if (state.progressMoviesRendered >= state.progressMoviesSorted.length) return;
+      appendMoviesProgressChunk(this);
     });
   }
 
@@ -1621,6 +1645,36 @@
     document.getElementById("detail-body").addEventListener("click", handleDetailBodyClick);
   }
 
+  // ---------- In-app confirm dialog (replaces window.confirm) ----------
+  function showConfirmDialog(opts) {
+    return new Promise(function (resolve) {
+      var modal = document.getElementById("confirm-modal");
+      var okBtn = document.getElementById("confirm-modal-ok");
+      var cancelBtn = document.getElementById("confirm-modal-cancel");
+      var backdrop = modal.querySelector(".confirm-modal-backdrop");
+
+      document.getElementById("confirm-modal-title").textContent = opts.title || "";
+      document.getElementById("confirm-modal-message").textContent = opts.message || "";
+      okBtn.textContent = opts.confirmLabel || "Confirmar";
+      cancelBtn.textContent = opts.cancelLabel || "Cancelar";
+
+      function cleanup(result) {
+        modal.classList.remove("show");
+        okBtn.removeEventListener("click", onOk);
+        cancelBtn.removeEventListener("click", onCancel);
+        backdrop.removeEventListener("click", onCancel);
+        resolve(result);
+      }
+      function onOk() { cleanup(true); }
+      function onCancel() { cleanup(false); }
+
+      okBtn.addEventListener("click", onOk);
+      cancelBtn.addEventListener("click", onCancel);
+      backdrop.addEventListener("click", onCancel);
+      modal.classList.add("show");
+    });
+  }
+
   // ---------- Remove a title from the library ----------
   function deleteRow(table, uuid) {
     return fetch(SUPABASE_CONFIG.url + "/rest/v1/" + table + "?uuid=eq." + uuid, {
@@ -1647,13 +1701,20 @@
   }
 
   function handleRemoveClick(btn, kind, uuid, title) {
-    var confirmed = window.confirm(
-      'Remover "' + title + '" da sua lista?\nIsso apaga o título e ' +
-      (kind === "series" ? "todos os episódios marcados" : "o registro") +
-      " permanentemente. Essa ação não pode ser desfeita."
-    );
-    if (!confirmed) return;
+    showConfirmDialog({
+      title: 'Remover "' + title + '"?',
+      message: "Isso apaga o título e " +
+        (kind === "series" ? "todos os episódios marcados" : "o registro") +
+        " permanentemente. Essa ação não pode ser desfeita.",
+      confirmLabel: "Remover",
+      cancelLabel: "Cancelar"
+    }).then(function (confirmed) {
+      if (!confirmed) return;
+      doRemoveFromLibrary(btn, kind, uuid, title);
+    });
+  }
 
+  function doRemoveFromLibrary(btn, kind, uuid, title) {
     btn.disabled = true;
     btn.textContent = "Removendo…";
 
@@ -1683,7 +1744,15 @@
         headers: { Authorization: "Bearer " + token }
       }).then(function (r) { return r.ok ? r.json() : { data: [] }; });
     }).then(function (json) {
-      return (json.data || []).filter(function (r) { return r.type === "series" || r.type === "movie"; });
+      return (json.data || [])
+        .filter(function (r) { return r.type === "series" || r.type === "movie"; })
+        .map(function (r) {
+          // The search endpoint returns the original-language name but also
+          // a translations map — prefer the Portuguese title when available.
+          var t = r.translations || {};
+          r.name = t.por || t.pt || r.name;
+          return r;
+        });
     }).catch(function (err) {
       console.error(err);
       return [];
