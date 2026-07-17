@@ -78,13 +78,22 @@
   </div>
 
   <div id="screen-progresso" class="screen">
-    <header class="app-header">
-      <div class="tabs">
+    <header class="app-header progress-header">
+      <div class="progress-mode-switch">
+        <button class="progress-mode-btn active" data-mode="series">Séries</button>
+        <button class="progress-mode-btn" data-mode="movies">Filmes</button>
+      </div>
+      <div class="tabs" id="progress-series-tabs">
         <button class="progress-tab active" data-status="all">TODAS</button>
         <button class="progress-tab" data-status="continuing">ASSISTINDO</button>
         <button class="progress-tab" data-status="stopped">PARADAS</button>
         <button class="progress-tab" data-status="up_to_date">COMPLETAS</button>
-        <button class="progress-tab" data-status="movies">FILMES</button>
+      </div>
+      <div class="tabs progress-tabs-hidden" id="progress-movies-tabs">
+        <button class="progress-tab active" data-movie-filter="all">TODOS</button>
+        <button class="progress-tab" data-movie-filter="pending">PENDENTES</button>
+        <button class="progress-tab" data-movie-filter="favorites">FAVORITOS</button>
+        <button class="progress-tab" data-movie-filter="watched">COMPLETOS</button>
       </div>
     </header>
     <main id="progress-container" class="list-container progress-container"></main>

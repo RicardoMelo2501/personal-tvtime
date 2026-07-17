@@ -506,6 +506,37 @@ html, body {
 .stat-label { font-size: 11px; color: var(--text-dim); margin-top: 2px; text-transform: uppercase; letter-spacing: 0.3px; }
 
 /* Progress module */
+.progress-header {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+}
+.progress-mode-switch {
+  display: flex;
+  background: #ececef;
+  border-radius: 10px;
+  padding: 3px;
+  gap: 3px;
+}
+.progress-mode-btn {
+  flex: 1;
+  background: none;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: #7a7a80;
+  padding: 8px 0;
+  cursor: pointer;
+}
+.progress-mode-btn.active {
+  background: #fff;
+  color: var(--black);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+}
+.progress-tabs-hidden { display: none; }
+
 .progress-tab {
   background: none;
   border: none;
@@ -593,6 +624,19 @@ html, body {
 .progress-status-movie_unwatched { background: #6b6b70; }
 
 .progress-fav-star { color: #f5b301; font-size: 13px; }
+
+.progress-fav-toggle {
+  align-self: center;
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  font-size: 22px;
+  line-height: 1;
+  color: #b3b3b6;
+  padding: 10px 14px;
+  cursor: pointer;
+}
+.progress-fav-toggle.fav { color: #f5b301; }
 
 .movies-progress-summary {
   display: flex;
@@ -787,6 +831,20 @@ html, body {
   margin-top: 16px;
 }
 .movie-watch-btn.watched { background: #2e7d32; color: #fff; }
+
+.movie-fav-btn {
+  width: 100%;
+  padding: 13px;
+  border-radius: 12px;
+  border: 1px solid #6b5a1e;
+  background: transparent;
+  color: #f5b301;
+  font-weight: 700;
+  font-size: 14px;
+  cursor: pointer;
+  margin-top: 10px;
+}
+.movie-fav-btn.fav { background: #f5b301; border-color: #f5b301; color: #1a1a1d; }
 
 .toggle-status-btn {
   width: 100%;
@@ -1047,6 +1105,9 @@ html, body {
   .card, .list-card, .stat-card, .search-row, .search-bar input, .bottom-nav, .progress-card, .movies-progress-summary { background: #1a1a1d; border-color: #2a2a2e; color: #f0f0f0; }
   body, .phone { color: #f0f0f0; }
   .tab.active, .progress-tab.active { color: #fff; border-bottom-color: #fff; }
+  .progress-mode-switch { background: #1a1a1d; }
+  .progress-mode-btn { color: #8a8a90; }
+  .progress-mode-btn.active { background: #2e2e33; color: #fff; }
   .progress-bar-track { background: #2a2a2e; }
   .progress-bar-fill { background: #fff; }
   .progress-status-up_to_date { background: #fff; color: #111; }

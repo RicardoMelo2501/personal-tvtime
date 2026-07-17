@@ -30,6 +30,8 @@
     assistidosLoading: false,
     activeTab: "minha-lista",
     activeProgressStatus: "all",
+    activeProgressMode: "series",
+    activeProgressMovieFilter: "all",
     progressMoviesSorted: [],
     progressMoviesRendered: 0,
     gridView: false,
@@ -159,6 +161,15 @@
     }).then(function (r) {
       handleAuthFailure(r);
       if (!r.ok) return r.text().then(function (t) { throw new Error("Falha ao atualizar filme: " + t); });
+    });
+  }
+
+  function patchMovieFavorite(uuid, favorite) {
+    return fetch(SUPABASE_CONFIG.url + "/rest/v1/movies?uuid=eq." + uuid, {
+      method: "PATCH", headers: authHeaders({ "Content-Type": "application/json", Prefer: "return=minimal" }), body: JSON.stringify({ is_favorite: favorite })
+    }).then(function (r) {
+      handleAuthFailure(r);
+      if (!r.ok) return r.text().then(function (t) { throw new Error("Falha ao atualizar favorito: " + t); });
     });
   }
 
@@ -834,14 +845,15 @@
     wrap.innerHTML =
       '<div class="progress-card-poster" style="' + posterStyle(seed[0], seed[1]) + '">' + escapeHtml(initials(title)) + '</div>' +
       '<div class="progress-card-info">' +
-        '<div class="progress-card-title">' + escapeHtml(title) +
-          (m.is_favorite ? ' <span class="progress-fav-star" title="Favorito">★</span>' : '') + '</div>' +
+        '<div class="progress-card-title">' + escapeHtml(title) + '</div>' +
         '<div class="progress-card-meta">' +
           '<span class="progress-status-badge progress-status-' + (m.is_watched ? 'movie_watched' : 'movie_unwatched') + '">' +
             (m.is_watched ? 'Assistido' : 'Pendente') + '</span>' +
           '<span class="progress-count">' + escapeHtml(metaLine) + '</span>' +
         '</div>' +
-      '</div>';
+      '</div>' +
+      '<button class="progress-fav-toggle' + (m.is_favorite ? ' fav' : '') + '" data-fav-id="' + escapeHtml(m.uuid) + '" title="' +
+        (m.is_favorite ? 'Remover dos favoritos' : 'Adicionar aos favoritos') + '">' + (m.is_favorite ? '★' : '☆') + '</button>';
     applyMoviePosterArtwork(wrap.querySelector(".progress-card-poster"), m.tvdb_id);
     return wrap;
   }
@@ -858,26 +870,53 @@
     state.progressMoviesRendered += next.length;
   }
 
+  function filterProgressMovies(movies) {
+    var filter = state.activeProgressMovieFilter;
+    if (filter === "pending") return movies.filter(function (m) { return !m.is_watched; });
+    if (filter === "favorites") return movies.filter(function (m) { return m.is_favorite; });
+    if (filter === "watched") return movies.filter(function (m) { return m.is_watched; });
+    return movies;
+  }
+
+  function movieFilterEmptyMessage() {
+    var filter = state.activeProgressMovieFilter;
+    if (filter === "pending") return "Nenhum filme pendente. Tudo em dia!";
+    if (filter === "favorites") return "Nenhum filme favorito ainda.";
+    if (filter === "watched") return "Nenhum filme assistido ainda.";
+    return "Nenhum filme na sua lista.";
+  }
+
   function renderMoviesProgress(container) {
-    var movies = state.moviesRaw.slice();
-    if (!movies.length) {
+    var all = state.moviesRaw;
+    if (!all.length) {
       container.innerHTML = '<div class="empty-state">Nenhum filme na sua lista.</div>';
       return;
     }
 
-    var watched = movies.filter(function (m) { return m.is_watched; }).length;
-    var favorites = movies.filter(function (m) { return m.is_favorite; }).length;
-    var pct = Math.round((watched / movies.length) * 100);
+    var watched = all.filter(function (m) { return m.is_watched; }).length;
+    var favorites = all.filter(function (m) { return m.is_favorite; }).length;
+    var pct = Math.round((watched / all.length) * 100);
 
     var summary = document.createElement("div");
     summary.className = "movies-progress-summary";
     summary.innerHTML =
       '<div class="progress-card-meta">' +
-        '<span class="progress-count">' + watched + '/' + movies.length + ' filmes assistidos (' + pct + '%)' +
+        '<span class="progress-count">' + watched + '/' + all.length + ' filmes assistidos (' + pct + '%)' +
           (favorites ? ' · ★ ' + favorites + ' favoritos' : '') + '</span>' +
       '</div>' +
       '<div class="progress-bar-track"><div class="progress-bar-fill" style="width:' + pct + '%"></div></div>';
     container.appendChild(summary);
+
+    var movies = filterProgressMovies(all.slice());
+    if (!movies.length) {
+      var empty = document.createElement("div");
+      empty.className = "empty-state";
+      empty.textContent = movieFilterEmptyMessage();
+      container.appendChild(empty);
+      state.progressMoviesSorted = [];
+      state.progressMoviesRendered = 0;
+      return;
+    }
 
     // Pending movies first (that's the actionable part of "progress"),
     // then watched ones by most recent watch date.
@@ -899,7 +938,7 @@
     var container = document.getElementById("progress-container");
     container.innerHTML = "";
 
-    if (state.activeProgressStatus === "movies") {
+    if (state.activeProgressMode === "movies") {
       renderMoviesProgress(container);
       return;
     }
@@ -912,17 +951,59 @@
     list.forEach(function (item) { container.appendChild(progressCard(item)); });
   }
 
+  function toggleMovieFavorite(uuid) {
+    var movie = state.moviesRaw.filter(function (m) { return m.uuid === uuid; })[0];
+    if (!movie) return;
+    var nowFav = !movie.is_favorite;
+    movie.is_favorite = nowFav;
+    renderProgressList();
+
+    patchMovieFavorite(uuid, nowFav).catch(function (err) {
+      movie.is_favorite = !nowFav;
+      renderProgressList();
+      showToast("Erro ao atualizar favorito");
+      console.error(err);
+    });
+  }
+
   function setupProgressControls() {
-    document.querySelectorAll(".progress-tab").forEach(function (tab) {
+    document.querySelectorAll(".progress-mode-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var mode = btn.getAttribute("data-mode");
+        if (mode === state.activeProgressMode) return;
+        state.activeProgressMode = mode;
+        document.querySelectorAll(".progress-mode-btn").forEach(function (b) { b.classList.remove("active"); });
+        btn.classList.add("active");
+        document.getElementById("progress-series-tabs").classList.toggle("progress-tabs-hidden", mode !== "series");
+        document.getElementById("progress-movies-tabs").classList.toggle("progress-tabs-hidden", mode !== "movies");
+        renderProgressList();
+      });
+    });
+
+    document.querySelectorAll("#progress-series-tabs .progress-tab").forEach(function (tab) {
       tab.addEventListener("click", function () {
-        document.querySelectorAll(".progress-tab").forEach(function (t) { t.classList.remove("active"); });
+        document.querySelectorAll("#progress-series-tabs .progress-tab").forEach(function (t) { t.classList.remove("active"); });
         tab.classList.add("active");
         state.activeProgressStatus = tab.getAttribute("data-status");
         renderProgressList();
       });
     });
 
+    document.querySelectorAll("#progress-movies-tabs .progress-tab").forEach(function (tab) {
+      tab.addEventListener("click", function () {
+        document.querySelectorAll("#progress-movies-tabs .progress-tab").forEach(function (t) { t.classList.remove("active"); });
+        tab.classList.add("active");
+        state.activeProgressMovieFilter = tab.getAttribute("data-movie-filter");
+        renderProgressList();
+      });
+    });
+
     document.getElementById("progress-container").addEventListener("click", function (e) {
+      var favBtn = e.target.closest(".progress-fav-toggle");
+      if (favBtn) {
+        toggleMovieFavorite(favBtn.getAttribute("data-fav-id"));
+        return;
+      }
       var card = e.target.closest(".progress-card");
       if (!card) return;
       var movieId = card.getAttribute("data-movie-id");
@@ -931,7 +1012,7 @@
     });
 
     document.getElementById("progress-container").addEventListener("scroll", function () {
-      if (state.activeProgressStatus !== "movies") return;
+      if (state.activeProgressMode !== "movies") return;
       if (this.scrollTop + this.clientHeight < this.scrollHeight - 160) return;
       if (state.progressMoviesRendered >= state.progressMoviesSorted.length) return;
       appendMoviesProgressChunk(this);
@@ -1612,6 +1693,9 @@
         '<button id="movie-watch-toggle" class="movie-watch-btn' + (movie.is_watched ? ' watched' : '') + '">' +
           (movie.is_watched ? "Assistido ✓" : "Marcar como assistido") +
         '</button>' +
+        '<button id="movie-fav-toggle" class="movie-fav-btn' + (movie.is_favorite ? ' fav' : '') + '">' +
+          (movie.is_favorite ? "★ Favorito" : "☆ Adicionar aos favoritos") +
+        '</button>' +
         '<button id="remove-from-library-btn" class="remove-from-library-btn">Remover da minha lista</button>' +
       '</div>';
 
@@ -1631,6 +1715,26 @@
         btn.textContent = !nowWatched ? "Assistido ✓" : "Marcar como assistido";
         renderProgressList();
         showToast("Erro ao atualizar filme");
+        console.error(err);
+      });
+    });
+
+    document.getElementById("movie-fav-toggle").addEventListener("click", function () {
+      var btn = this;
+      function applyFavUi(fav) {
+        btn.classList.toggle("fav", fav);
+        btn.textContent = fav ? "★ Favorito" : "☆ Adicionar aos favoritos";
+      }
+      var nowFav = !movie.is_favorite;
+      movie.is_favorite = nowFav;
+      applyFavUi(nowFav);
+      renderProgressList();
+
+      patchMovieFavorite(movie.uuid, nowFav).catch(function (err) {
+        movie.is_favorite = !nowFav;
+        applyFavUi(!nowFav);
+        renderProgressList();
+        showToast("Erro ao atualizar favorito");
         console.error(err);
       });
     });
